@@ -53,6 +53,7 @@ SuperSplat is based on the upstream https://github.com/playcanvas/supersplat, fo
    - The frontend defaults to `http://localhost:8000` for the backend.
    - If you run the backend on another port, set `VITE_API_BASE=http://localhost:<port>` before `npm run dev`.
    - The experimental SuperSplat renderer is pulled from the app-specific fork (`amariichi/supersplat` `sbs-spike`) via npm, which tracks upstream playcanvas/supersplat.
+1. Open `http://localhost:5173/` in your browser (default Vite dev server URL).
 1. (Optional) Use `scripts/dev.sh` to start backend and frontend together.
    - Set `BACKEND_PORT` or `FRONTEND_PORT` if you need non-default ports.
    - If you prefer tmux (two panes), run `scripts/dev_tmux.sh` (requires tmux installed).
@@ -147,6 +148,7 @@ SuperSplat は上流の https://github.com/playcanvas/supersplat を amariichi �
    - フロントはデフォルトで `http://localhost:8000` をバックエンドに使います。
    - 別ポートの場合は `VITE_API_BASE=http://localhost:<port>` を設定してください。
    - SuperSplat レンダラーはアプリ専用フォーク（`amariichi/supersplat` の `sbs-spike`）を npm 経由で取得します。
+1. ブラウザで `http://localhost:5173/` を開きます（Vite dev server の既定 URL）。
 1. （任意）`scripts/dev.sh` で backend + frontend を同時起動できます。
 1. 画像をアップロードすると `/api/upload` に POST され、`/api/scene/{jobId}/status` をポーリングします。
 1. `done` になると PLY が表示され、Download / logs も利用可能になります。mono/SBS の PNG/JPG 保存や params.json 保存が可能です。
