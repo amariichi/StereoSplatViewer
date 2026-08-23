@@ -1,12 +1,24 @@
 name: CI
 
-# Every branch and every pull request. A check that only runs on main tells you
-# after the fact; this one has to be able to gate a merge.
+# A branch and a pull request for it are the same commit, so running on every
+# push as well as every pull request checked each commit twice and put two rows
+# of identical results on every pull request. Pull requests are where the gate
+# has to work, and main is what has to stay green after a merge; between them
+# every commit that matters is covered exactly once.
 on:
   push:
     branches:
-      - "**"
+      - main
+    tags:
+      - "v*"
   pull_request:
+
+# Pushing again to a branch under review makes the previous run pointless. Let
+# the new one cancel it rather than queue behind it. Never on main, where each
+# run records whether that commit was good.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   backend:
