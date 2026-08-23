@@ -103,6 +103,22 @@ type Props = {
 };
 
 /** The part of the engine's splat sorter this viewer needs, which its published types do not name. */
+/**
+ * What to tell someone when the splat sorter cannot be reached.
+ *
+ * Drawing happens on demand here, and the cue to draw is the sorter announcing
+ * that it has finished putting the gaussians in back-to-front order. Without
+ * that cue nothing would ever ask for a frame after the first, so the fallback
+ * is to draw every frame: wasteful, and visible, which beats correct and blank.
+ */
+const SORTER_MISSING_ADVICE = [
+  'PlayCanvas: could not reach the splat sorter, so this is drawing every frame',
+  'instead of only when the ordering changes. It still works and costs more',
+  'battery. This happens on PlayCanvas 2.21.4 and later, where unified',
+  'rendering is the default and GSplatComponent#instance returns null. Moving',
+  'to that API means changing how render scheduling works in SplatViewer.tsx.',
+].join(' ');
+
 type SorterEvents = {
   on(name: 'updated', handler: () => void): void;
   off(name: 'updated', handler: () => void): void;
@@ -750,10 +766,25 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
       // after loading ran before the first ordering arrived, and nothing asked
       // for another. Every completed ordering is a reason to draw, both for the
       // first one and for each one that follows the camera moving.
+      //
+      // The sorter is not in the published types, hence the cast. That makes
+      // this the one place a PlayCanvas upgrade can break without any check
+      // noticing: on 2.21.4 `instance` returns null, because unified rendering
+      // is the default there and the component no longer exposes one. The cast
+      // still compiles, the sorter is simply never found, and with drawing on
+      // demand nothing ever asks for the frame -- a blank canvas and not one
+      // word anywhere. So say so, and keep drawing.
       const sorter = (splat.gsplat?.instance as unknown as { sorter?: SorterEvents })?.sorter;
       if (sorter) {
         sorter.on('updated', forceRender);
         sorterRef.current = sorter;
+        app.autoRender = false;
+      } else {
+        // Every frame instead of only the ones that matter: more work than is
+        // needed, and the scene appears, which is the right way round. See
+        // SORTER_MISSING_ADVICE for what to do about it.
+        console.warn(SORTER_MISSING_ADVICE);
+        app.autoRender = true;
       }
 
       frameSceneToContent();
