@@ -233,9 +233,25 @@ def process_equirectangular_job(
     merged_path = workdir / f"{input_image.stem}.ply"
     merged_ply = None
     merge_cli = _resolve_merge_cli()
+    # The log is the only place a 360 job explains itself, so say what happened
+    # to the merge either way. Without this the log simply stops after the
+    # normalize step and the six faces look like they went nowhere.
+    with stdout_path.open("a", encoding="utf-8") as stdout_file:
+        if merge_cli:
+            stdout_file.write(f"=== 360 merge: using {merge_cli} ===\n")
+        else:
+            stdout_file.write(
+                "=== 360 merge: SKIPPED ===\n"
+                "No merge tool found. Set SPLAT_MERGE_CLI or put splat-transform on PATH\n"
+                "(npm install -g @playcanvas/splat-transform), then restart the backend.\n"
+                "The six faces are complete; only the merge into one scene is missing.\n"
+            )
     if merge_cli:
         if _merge_plys(merge_cli, merged_path, ply_paths, stdout_path, stderr_path):
             merged_ply = merged_path.name
+        else:
+            with stdout_path.open("a", encoding="utf-8") as stdout_file:
+                stdout_file.write("=== 360 merge: FAILED (see stderr) ===\n")
 
     overscan_fov = faces[0].face.fov_deg if faces else DEFAULT_OVERSCAN_FOV_DEG
     metadata = {
@@ -582,17 +598,38 @@ def _apply_normal_adjust(
 
 
 def _apply_global_flip_and_center(ply_paths: list[Path], stdout_path: Path) -> None:
+    """
+    Put the six faces into the viewer's convention.
+
+    Only the axis flip is applied. The scene is deliberately NOT recentred: all
+    six faces were unprojected from a single camera standing at the origin, so
+    the origin already is the capture point, and every viewer here places the
+    eye there. Translating the scene moves the capture point away from the eye,
+    which is the one thing that cannot be corrected afterwards -- two cones with
+    different apexes diverge with distance.
+
+    The previous behaviour recentred on the midpoint of a bounding box measured
+    from a random 200,000-point subsample of each face. A bounding box is set by
+    its most extreme outliers, so which points the sample happened to include
+    changed the result on every run: two runs of the same image produced centres
+    of z=-20.104 and z=-4.612, and the scene appeared at a different size and
+    distance each time.
+    """
+
     if not ply_paths:
         return
-    center = _compute_global_center(ply_paths)
     flip = np.diag([1.0, -1.0, 1.0]).astype(np.float32)
+    center = _compute_global_center(ply_paths)
     with stdout_path.open("a", encoding="utf-8") as stdout_file:
         stdout_file.write(
             "=== 360 global normalize ===\n"
-            f"center={center[0]:.3f},{center[1]:.3f},{center[2]:.3f}\n"
+            "flip applied; scene kept at the capture point (no recentring)\n"
+            f"measured bounding-box midpoint (not applied)={center[0]:.3f},"
+            f"{center[1]:.3f},{center[2]:.3f}\n"
         )
+    zero = np.zeros(3, dtype=np.float32)
     for path in ply_paths:
-        _apply_transform(path, flip, -center)
+        _apply_transform(path, flip, zero)
 
 
 def _compute_global_center(ply_paths: list[Path], max_samples: int = 200000) -> np.ndarray:
@@ -601,8 +638,11 @@ def _compute_global_center(ply_paths: list[Path], max_samples: int = 200000) -> 
     for path in ply_paths:
         positions = _load_positions(path)
         if positions.shape[0] > max_samples:
-            idx = np.random.choice(positions.shape[0], size=max_samples, replace=False)
-            positions = positions[idx]
+            # Take an evenly spaced slice rather than a random draw: a bounding
+            # box is decided by outliers, so a random subsample gives a
+            # different answer every run.
+            step = max(1, positions.shape[0] // max_samples)
+            positions = positions[::step]
         mins = np.minimum(mins, positions.min(axis=0))
         maxs = np.maximum(maxs, positions.max(axis=0))
     return (mins + maxs) * 0.5

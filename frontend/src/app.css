@@ -1,8 +1,21 @@
+/*
+ * The editor's one job is to show a scene. Everything else is settings, so the
+ * scene gets the space and the settings get a column beside it -- rather than
+ * the numbered panels this used to be, which pushed the picture below the fold
+ * and made three independent things look like three steps of a wizard.
+ */
+
 :root {
-  color: #e6e7eb;
-  background-color: #0f172a;
-  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  line-height: 1.6;
+  --bg: #0b1017;
+  --bg-raised: #131a24;
+  --line: #223041;
+  --text: #e2e8f0;
+  --text-dim: #94a3b8;
+  --accent: #3b82f6;
+  --accent-text: #ffffff;
+  --good: #34d399;
+  --bad: #f87171;
+  --radius: 10px;
 }
 
 * {
@@ -11,185 +24,549 @@
 
 body {
   margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", "Noto Sans", sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
   min-height: 100vh;
 }
 
-main {
-  max-width: 980px;
-  margin: 0 auto;
-  padding: 2rem 1.5rem 3rem;
+.app__header {
+  padding: 1.1rem 1.5rem 0.9rem;
+  border-bottom: 1px solid var(--line);
 }
 
-h1 {
-  margin: 0 0 0.75rem;
-}
-
-h2 {
-  margin: 1rem 0 0.5rem;
-}
-
-header {
-  margin-bottom: 1.5rem;
-}
-
-.eyebrow {
+.app__header h1 {
   margin: 0;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-  font-size: 0.8rem;
-  color: #94a3b8;
+  font-size: 1.15rem;
+  font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .lede {
-  margin: 0.5rem 0 0;
-  color: #cbd5e1;
+  margin: 0.15rem 0 0;
+  color: var(--text-dim);
+  font-size: 0.875rem;
 }
 
-.panel {
-  background: #111827;
-  border: 1px solid #1f2937;
-  border-radius: 12px;
-  padding: 1.25rem;
-  margin-bottom: 1rem;
-  box-shadow: 0 12px 30px rgba(15, 23, 42, 0.35);
+.app__body {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 340px;
+  gap: 1.25rem;
+  padding: 1.25rem 1.5rem 1.5rem;
+  align-items: start;
 }
 
-.upload-form {
+/* The stage ------------------------------------------------------------- */
+
+.stage {
   display: flex;
-  gap: 0.75rem;
+  flex-direction: column;
+  gap: 0.5rem;
+  position: sticky;
+  top: 1.25rem;
+}
+
+.stage__frame {
+  position: relative;
+  aspect-ratio: 16 / 10;
+  min-height: 340px;
+  max-height: calc(100vh - 9rem);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #05080c;
+  overflow: hidden;
+}
+
+.stage__hint {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
+.stage__empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 2rem;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.stage__empty-title {
+  margin: 0;
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.stage__empty p {
+  margin: 0;
+  max-width: 34ch;
+}
+
+.stage__held {
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  margin-top: 0.9rem !important;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--line);
+  max-width: 42ch !important;
 }
 
-input[type="file"] {
-  color: #e6e7eb;
+.stage__held strong {
+  color: var(--text);
+  font-weight: 500;
+  overflow-wrap: anywhere;
 }
 
-button {
-  background: linear-gradient(135deg, #2563eb, #0ea5e9);
-  border: none;
-  color: white;
-  padding: 0.6rem 1rem;
-  border-radius: 8px;
+kbd {
+  padding: 0.05rem 0.35rem;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  font-family: inherit;
+  font-size: 0.8em;
+}
+
+/* The sidebar ----------------------------------------------------------- */
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.card {
+  padding: 0.9rem 1rem 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.card h2 {
+  margin: 0;
+  font-size: 0.72rem;
   font-weight: 600;
-  cursor: pointer;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-dim);
 }
 
-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-}
-
-a {
-  color: #38bdf8;
-}
-
-.error {
-  color: #f87171;
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
 }
 
 .row {
   display: flex;
-  gap: 0.75rem;
-  align-items: center;
   flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem;
 }
 
-.gap-sm {
-  gap: 0.5rem;
-}
+/* Fields ---------------------------------------------------------------- */
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  font-size: 0.95rem;
+  gap: 0.3rem;
+  font-size: 0.875rem;
 }
 
-.checkbox {
-  flex-direction: row;
-  align-items: center;
+/* One row for the label and its current value; any explanation wraps beneath
+   it at full width. */
+.field > span {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.1rem 0.5rem;
+}
+
+.field > span > output {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+.field em,
+.toggle em {
+  font-style: normal;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
+.field em {
+  flex: 1 0 100%;
+}
+
+.field--quiet {
+  padding-top: 0.7rem;
+  border-top: 1px solid var(--line);
+  color: var(--text-dim);
+}
+
+input[type="number"],
+input[type="file"],
+select {
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.875rem;
+}
+
+input[type="file"] {
+  padding: 0.3rem;
+  font-size: 0.8rem;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+/* The picture chooser and the paste button do the same job, so they sit on one
+   row; the lens and the button that starts the work sit on the next. */
+.source-pick {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.4rem;
+  align-items: center;
 }
 
-.field input,
-.field select {
-  background: #0b1220;
-  border: 1px solid #1f2937;
-  border-radius: 8px;
-  padding: 0.5rem 0.6rem;
-  color: #e6e7eb;
+.source-run {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: end;
 }
 
-.file-button input[type="file"] {
-  display: none;
+.source-run .btn--primary {
+  height: 2.1rem;
 }
 
-.viewer-wrapper {
-  border: 1px solid #1f2937;
-  border-radius: 12px;
+.tucked {
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.tucked summary {
+  cursor: pointer;
+}
+
+.tucked input[type="file"] {
+  margin-top: 0.4rem;
+}
+
+.toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.15rem 0.5rem;
+  align-items: start;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.toggle input[type="checkbox"] {
+  margin: 0.25rem 0 0;
+  accent-color: var(--accent);
+}
+
+.toggle > span {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.chosen {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Buttons --------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  padding: 0.42rem 0.75rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-decoration: none;
+  background: none;
+  color: var(--text);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* One action on this page actually starts something. Only it is filled in. */
+.btn--primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
+  padding: 0.5rem 0.75rem;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: #2f74e6;
+}
+
+.btn--ghost {
+  border-color: var(--line);
+  background: var(--bg);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  border-color: #33465e;
+}
+
+.btn--quiet {
+  color: var(--text-dim);
+  padding: 0.3rem 0.5rem;
+  font-size: 0.8rem;
+}
+
+.btn--quiet:hover:not(:disabled) {
+  color: var(--text);
+  background: rgba(148, 163, 184, 0.1);
+}
+
+.file-button {
+  position: relative;
   overflow: hidden;
 }
 
-.viewer {
-  position: relative;
+.file-button input[type="file"] {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
   width: 100%;
-  height: 480px;
-  background: #0b1220;
+  padding: 0;
 }
 
-.viewer-canvas {
-  width: 100%;
-  height: 100%;
+.segmented {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--bg);
 }
 
-.viewer-canvas canvas {
-  width: 100%;
-  height: 100%;
-  display: block;
+.segmented button {
+  padding: 0.35rem 0.5rem;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
 }
 
-.viewer:fullscreen {
-  width: 100%;
-  height: 100%;
+.segmented button.is-on {
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 600;
 }
 
-.viewer:fullscreen .viewer-canvas {
-  width: 100%;
-  height: 100%;
+/* Messages -------------------------------------------------------------- */
+
+.kv {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.kv > span {
+  flex: 0 0 3.5rem;
+  color: var(--text-dim);
+}
+
+.kv > strong {
+  font-weight: 500;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+code {
+  font-size: 0.85em;
+  background: rgba(148, 163, 184, 0.14);
+  padding: 0.05rem 0.3rem;
+  border-radius: 3px;
+  overflow-wrap: anywhere;
+}
+
+.error,
+.phone-ready,
+.paste-error {
+  margin: 0;
+  padding: 0.55rem 0.7rem;
+  border-left: 3px solid;
+  border-radius: 0 6px 6px 0;
+  font-size: 0.83rem;
+  line-height: 1.5;
+}
+
+.error,
+.paste-error {
+  border-color: var(--bad);
+  background: rgba(248, 113, 113, 0.09);
+}
+
+.phone-ready {
+  border-color: var(--good);
+  background: rgba(52, 211, 153, 0.08);
+}
+
+.phone-ready a {
+  color: var(--good);
+  overflow-wrap: anywhere;
+}
+
+.status-pill {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
+.logs summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+}
+
+.logs pre {
+  max-height: 14rem;
+  overflow: auto;
+  margin: 0.4rem 0 0;
+  padding: 0.5rem;
+  border-radius: 6px;
+  background: var(--bg);
+  font-size: 0.75rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* While a scene is being made ------------------------------------------- */
+
+.building-banner {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  background: rgba(5, 8, 12, 0.92);
+  text-align: center;
+  padding: 1.5rem;
+}
+
+.building-banner__spinner {
+  width: 34px;
+  height: 34px;
+  border: 3px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.building-banner__text {
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.building-banner__note {
+  color: var(--text-dim);
+  font-size: 0.85rem;
 }
 
 .viewer-error {
   position: absolute;
-  bottom: 0.75rem;
-  right: 0.75rem;
-  background: rgba(255, 71, 87, 0.12);
-  color: #fecdd3;
-  padding: 0.5rem 0.75rem;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 71, 87, 0.4);
+  inset: auto 0 0;
+  z-index: 2;
+  padding: 0.6rem 0.8rem;
+  background: rgba(248, 113, 113, 0.16);
+  color: var(--text);
+  font-size: 0.83rem;
 }
 
-.status-pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.25rem 0.6rem;
-  border-radius: 999px;
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  background: rgba(15, 23, 42, 0.65);
-  color: #e2e8f0;
-  font-size: 0.72rem;
-  letter-spacing: 0.02em;
+/* Narrow windows -------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  .app__body {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 1rem;
+  }
+
+  .stage {
+    position: static;
+  }
+
+  .stage__frame {
+    max-height: 60vh;
+  }
+
+  .sidebar {
+    width: 100%;
+  }
 }
 
-.logs pre {
-  background: #0b1220;
-  padding: 0.75rem;
-  border-radius: 8px;
-  overflow-x: auto;
-}
-
-.hint {
-  color: #94a3b8;
-  margin-top: 0.5rem;
+@media (prefers-reduced-motion: reduce) {
+  .building-banner__spinner {
+    animation-duration: 3s;
+  }
 }

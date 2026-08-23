@@ -33,6 +33,41 @@ def clear_data_root() -> None:
     keep.write_text("", encoding="utf-8")
 
 
+def data_root_summary() -> tuple[int, int]:
+    """How many scenes are on disk and how many bytes they occupy."""
+
+    if not DATA_ROOT.exists():
+        return (0, 0)
+    jobs = [d for d in DATA_ROOT.iterdir() if d.is_dir()]
+    total = sum(f.stat().st_size for d in jobs for f in d.rglob("*") if f.is_file())
+    return (len(jobs), total)
+
+
+def prune_to_latest() -> list[str]:
+    """
+    Drop every scene except the newest, and return the names of what was removed.
+
+    Uploading clears the data root first, so one scene is the intended steady
+    state. Anything older is a leftover from an interrupted run, and keeping it
+    would let the disk fill up quietly. The newest is kept because it is the one
+    the viewer page serves.
+    """
+
+    if not DATA_ROOT.exists():
+        return []
+    jobs = [d for d in DATA_ROOT.iterdir() if d.is_dir()]
+    if len(jobs) <= 1:
+        return []
+    newest = max(jobs, key=lambda d: d.stat().st_mtime)
+    removed = []
+    for job in jobs:
+        if job == newest:
+            continue
+        shutil.rmtree(job, ignore_errors=True)
+        removed.append(job.name)
+    return removed
+
+
 def job_dir(job_id: str) -> Path:
     """
     Return the path to the job directory without creating it.
@@ -94,3 +129,24 @@ def read_status(job_id: str) -> JobStatus | None:
     except json.JSONDecodeError:
         return None
     return JobStatus(status=data.get("status", "pending"), message=data.get("message", ""))
+
+
+def latest_job() -> dict[str, str] | None:
+    """The scene currently held, if there is one.
+
+    Every upload clears the data root first, so there is at most one job at any
+    time and "latest" is unambiguous. This exists so that the viewer page can be
+    opened on a phone by its plain address, without anyone having to copy a job
+    identifier across by hand.
+    """
+    if not DATA_ROOT.exists():
+        return None
+    candidates = [d for d in DATA_ROOT.iterdir() if d.is_dir()]
+    if not candidates:
+        return None
+    newest = max(candidates, key=lambda d: d.stat().st_mtime)
+    # A job that is still running has a directory but no scene in it yet.
+    scenes = sorted(newest.glob("*.ply"))
+    if not scenes:
+        return None
+    return {"jobId": newest.name, "name": scenes[0].name}

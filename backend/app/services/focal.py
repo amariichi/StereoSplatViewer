@@ -1,0 +1,82 @@
+"""Telling SHARP what lens the photograph was taken with.
+
+SHARP reads `FocalLengthIn35mmFilm` from the image's EXIF and, finding none,
+assumes 30 mm. That assumption is not a small one. It sets the field of view the
+scene is unprojected through, so it decides the shape of the reconstruction and
+how far away everything ends up: on one measured photograph the subject sat at
+2.66 metres under the 30 mm default and at 7.00 under 85 mm, which is where a
+portrait taken with that lens actually was.
+
+It also decides how the result can be looked at. A scene keeps the field of view
+it was made with, so the picture appears its natural size only where the screen
+subtends that angle -- 111 mm from the eye for the 30 mm default, which is no way
+to hold a phone, and 313 mm for 85 mm, which is arm's length.
+
+The command-line tool takes no focal length argument, so the value is written
+into the file's EXIF before it is handed over.
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+LOGGER = logging.getLogger(__name__)
+
+# Below this SHARP treats the value as a physical focal length rather than a
+# 35 mm equivalent and multiplies it by 8.4, which is not what a caller giving a
+# 35 mm equivalent means.
+MIN_FOCAL_MM = 10.0
+MAX_FOCAL_MM = 800.0
+
+
+def clamp_focal_mm(focal_mm: float | None) -> float | None:
+    """A usable 35 mm-equivalent focal length, or None to leave the file alone."""
+    if focal_mm is None:
+        return None
+    try:
+        value = float(focal_mm)
+    except (TypeError, ValueError):
+        return None
+    if not (value == value) or value <= 0:  # NaN or nonsense
+        return None
+    return min(max(value, MIN_FOCAL_MM), MAX_FOCAL_MM)
+
+
+def apply_focal_length(image_path: Path, focal_mm: float | None) -> bool:
+    """Write the focal length into the image's EXIF, in place.
+
+    Returns whether anything was written. Failure is not fatal: SHARP will fall
+    back to its own default and the scene will still be produced, just with the
+    wrong lens assumed.
+    """
+    value = clamp_focal_mm(focal_mm)
+    if value is None:
+        return False
+    try:
+        import piexif
+        from PIL import Image
+
+        with Image.open(image_path) as image:
+            fmt = image.format
+            data = image.convert("RGB") if image.mode not in ("RGB", "L") else image.copy()
+
+        try:
+            exif = piexif.load(str(image_path))
+        except Exception:  # noqa: BLE001 - a file with no or broken EXIF is normal
+            exif = {"0th": {}, "Exif": {}, "GPS": {}, "1st": {}, "thumbnail": None}
+        exif.setdefault("Exif", {})
+        exif["Exif"][piexif.ExifIFD.FocalLengthIn35mmFilm] = int(round(value))
+        # A thumbnail carried over from the original can exceed the segment
+        # limit and make the write fail for a reason unrelated to the change.
+        exif["thumbnail"] = None
+        exif["1st"] = {}
+
+        # PNG and friends have nowhere to put this, so the file becomes a JPEG.
+        # SHARP reads either.
+        data.save(image_path, format="JPEG" if fmt != "JPEG" else fmt,
+                  quality=95, exif=piexif.dump(exif))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Could not set the focal length on %s: %s", image_path, exc)
+        return False

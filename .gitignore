@@ -18,3 +18,19 @@ frontend/dist/
 # Backend data
 backend/.data/*
 !backend/.data/.gitkeep
+
+# Working notes. These are for this machine and must not reach a public
+# repository.
+EXECPLAN_*.md
+
+# Photographs, scenes and certificates. samples/ is a scratch folder for local
+# experiments, and the patterns after it catch an image or a scene dropped
+# somewhere other than samples/.
+/samples/
+*.jpg
+*.jpeg
+*.png
+*.webp
+*.ply
+*.sog
+.certs/

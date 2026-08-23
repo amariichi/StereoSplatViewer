@@ -65,8 +65,6 @@ echo "Setting up frontend dependencies..."
 if command -v npm >/dev/null 2>&1; then
   (
     cd "${ROOT_DIR}/frontend"
-    echo "Updating supersplat to latest sbs-spike..."
-    npm install "github:amariichi/supersplat#sbs-spike"
     npm install
   )
 else

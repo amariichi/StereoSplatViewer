@@ -1,0 +1,130 @@
+/* A phone page: the picture fills the screen and the controls sit over it. */
+:root { color-scheme: dark; }
+
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  background: #0b0d12;
+  color: #e6e9ef;
+  font: 14px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  overscroll-behavior: none;
+}
+
+.window-viewer { position: fixed; inset: 0; }
+.window-viewer__stage { position: absolute; inset: 0; touch-action: none; }
+
+.window-viewer__bar {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  display: flex;
+  gap: 8px;
+  padding: 10px calc(10px + env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) calc(10px + env(safe-area-inset-left));
+  background: linear-gradient(transparent, rgba(5, 7, 12, 0.85));
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+/* Tappable: the detail underneath is how a distance judged by eye gets checked
+   against the numbers the geometry is actually using. It is a button rather
+   than a div so that it can be reached without a pointer. */
+.window-viewer__status {
+  appearance: none;
+  border: 0;
+  background: none;
+  text-align: left;
+  padding: 0;
+  position: absolute;
+  top: calc(8px + env(safe-area-inset-top));
+  left: calc(10px + env(safe-area-inset-left));
+  right: calc(10px + env(safe-area-inset-right));
+  font: 12px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #9aa4b8;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+  white-space: pre-line;
+}
+
+.window-viewer button {
+  appearance: none;
+  border: 1px solid #2b3444;
+  background: #161b26;
+  color: #e6e9ef;
+  border-radius: 10px;
+  /* Large enough to hit with a thumb without aiming. */
+  min-height: 44px;
+  padding: 0 16px;
+  font-size: 15px;
+}
+.window-viewer button:disabled { opacity: 0.45; }
+.window-viewer button.primary { background: #2563eb; border-color: #2563eb; font-weight: 600; }
+
+/* A toggle whose state has to be readable at a glance: a stray finger during a
+   pinch can activate it, and a silently flipped setting looks like the tracking
+   reversing on its own. */
+.window-viewer button.on { background: #14532d; border-color: #22c55e; }
+
+.window-viewer__error {
+  position: absolute;
+  inset: auto 12px 96px 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: rgba(80, 20, 20, 0.92);
+  border: 1px solid #a33;
+}
+
+/* Double tap clears everything but the picture away. The controls sit over the
+   scene, so on a small screen they are most of what is in front of it. */
+.window-viewer--bare .window-viewer__bar,
+.window-viewer--bare .window-viewer__status {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease-out;
+}
+.window-viewer__bar,
+.window-viewer__status {
+  transition: opacity 160ms ease-out;
+}
+
+/* What the backend is doing, in the middle of the screen where it cannot be
+   missed. Building a scene takes tens of seconds; leaving the previous one up
+   through it looked as though nothing had happened at all. */
+.window-viewer__stage--hidden { visibility: hidden; }
+
+.window-viewer__building {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: #0b0d12;
+  text-align: center;
+  padding: 24px;
+}
+
+.window-viewer__building-text {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.window-viewer__building-note {
+  font-size: 14px;
+  color: #9aa4b8;
+}
+
+.window-viewer__spinner {
+  width: 46px;
+  height: 46px;
+  border-radius: 50%;
+  border: 3px solid #2b3444;
+  border-top-color: #2563eb;
+  animation: window-viewer-spin 900ms linear infinite;
+}
+
+@keyframes window-viewer-spin { to { transform: rotate(360deg); } }
+
+/* Someone who would rather not see it move. */
+@media (prefers-reduced-motion: reduce) {
+  .window-viewer__spinner { animation-duration: 2600ms; }
+}
