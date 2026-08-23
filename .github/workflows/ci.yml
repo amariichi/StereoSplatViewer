@@ -1,0 +1,57 @@
+name: CI
+
+# Every branch and every pull request. A check that only runs on main tells you
+# after the fact; this one has to be able to gate a merge.
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Only what the tests import. The real application also needs fastapi and
+      # uvicorn, but installing those here would slow every run to prove
+      # nothing: no test starts a server.
+      - name: Install test dependencies
+        run: python -m pip install --upgrade pip && python -m pip install pytest numpy pillow
+      - name: Run backend tests
+        run: python -m pytest backend/tests -q
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Lint
+        run: npm run lint -- --max-warnings=0
+      - name: Test
+        run: npm test
+      - name: Build
+        run: npm run build
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The launch scripts are how anyone starts this, so a syntax error in one
+      # is a broken project even when every test passes.
+      - name: Check the shell scripts parse
+        run: for f in scripts/*.sh; do bash -n "$f" || exit 1; done
