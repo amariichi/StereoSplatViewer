@@ -124,6 +124,7 @@ The scene is drawn by the PlayCanvas engine, which is the only rendering depende
 1. Start backend: `uvicorn backend.app.main:app --reload`.
 1. Start frontend: `cd frontend && npm ci && npm run dev`.
    - `npm ci` installs exactly what `package-lock.json` records, which is what CI does. `npm install` also works but may quietly move a dependency.
+   - The backend has the same thing in `backend/uv.lock`. `scripts/setup_wsl.sh` installs from it when `uv` is present, so you get the versions this was tested with; without `uv` it resolves the ranges instead and says so. After changing a backend dependency, run `uv lock --project backend` — CI checks the lock matches and fails if it does not.
    - The frontend reaches the backend through its own address, proxied by the dev server; nothing needs configuring for the default ports.
    - To point at a backend elsewhere, set `SSV_BACKEND_ORIGIN=http://host:port` before starting it.
 1. Open `http://localhost:5173/` in your browser (default Vite dev server URL).
@@ -304,6 +305,7 @@ StereoSplatViewer は、外部の `ml-sharp` を使って単一の写真から 3
 1. フロントエンド起動: `cd frontend && npm ci && npm run dev`
    - フロントはデフォルトで `http://localhost:8000` をバックエンドに使います。
    - `npm ci` は `package-lock.json` の内容そのままを入れます（CI と同じ）。`npm install` でも動きますが、依存が黙って動くことがあります。
+   - バックエンドにも同じものが `backend/uv.lock` としてあります。`uv` があれば `scripts/setup_wsl.sh` がそこから入れるので、検証済みの版が入ります。`uv` が無い場合はバージョン範囲から解決し、その旨を表示します。バックエンドの依存を変えたら `uv lock --project backend` を実行してください。CI がロックとの一致を検査し、ずれていれば失敗します。
    - フロントエンドは自分と同じアドレス経由でバックエンドに届くよう開発サーバーが中継するので、既定のポートなら設定は不要です。
    - 別のホストのバックエンドを見る場合は `SSV_BACKEND_ORIGIN=http://host:port` を設定してください。
 1. ブラウザで `http://localhost:5173/` を開きます（Vite dev server の既定 URL）。
