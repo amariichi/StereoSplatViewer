@@ -102,27 +102,38 @@ type Props = {
   }) => void;
 };
 
-/** The part of the engine's splat sorter this viewer needs, which its published types do not name. */
 /**
- * What to tell someone when the splat sorter cannot be reached.
+ * The engine's name for "a render would now show something new".
  *
- * Drawing happens on demand here, and the cue to draw is the sorter announcing
- * that it has finished putting the gaussians in back-to-front order. Without
- * that cue nothing would ever ask for a frame after the first, so the fallback
- * is to draw every frame: wasteful, and visible, which beats correct and blank.
+ * Drawing happens on demand here, so something has to say when a frame is worth
+ * drawing. Splats are drawn back to front and that ordering is produced off the
+ * main thread, so it lands a frame or more after the camera moves; streamed
+ * levels of detail arrive later still. PlayCanvas raises this event once per
+ * frame when either has produced something a render would show, which is
+ * exactly the cue this viewer needs. Its own documentation gives setting
+ * `renderNextFrame` from it as the intended use of `autoRender = false`.
+ *
+ * Taken from the engine's constant rather than written out, so that a rename
+ * upstream is a build error here instead of a silently blank canvas. That is
+ * the failure this replaces: before unified rendering the cue was read off an
+ * undocumented `instance.sorter`, a cast that kept compiling after the property
+ * went away.
  */
-const SORTER_MISSING_ADVICE = [
-  'PlayCanvas: could not reach the splat sorter, so this is drawing every frame',
-  'instead of only when the ordering changes. It still works and costs more',
-  'battery. This happens on PlayCanvas 2.21.4 and later, where unified',
-  'rendering is the default and GSplatComponent#instance returns null. Moving',
-  'to that API means changing how render scheduling works in SplatViewer.tsx.',
-].join(' ');
+const FRAME_REQUEST = pc.GSplatComponentSystem.EVENT_FRAMEREQUEST;
 
-type SorterEvents = {
-  on(name: 'updated', handler: () => void): void;
-  off(name: 'updated', handler: () => void): void;
-};
+/**
+ * What to tell someone when that cue cannot be subscribed to.
+ *
+ * Without it nothing would ask for a frame after the first, so the fallback is
+ * to draw every frame: wasteful, and visible, which beats correct and blank.
+ */
+const FRAME_REQUEST_MISSING_ADVICE = [
+  'PlayCanvas: could not subscribe to the gsplat system\'s',
+  `'${FRAME_REQUEST}' event, so this is drawing every frame instead of only`,
+  'when there is something new to show. It still works and costs more battery.',
+  'Check what replaced that event in the installed engine version and rewire',
+  'render scheduling in SplatViewer.tsx to it.',
+].join(' ');
 
 // Used when the gaussian positions cannot be read, so that a scene is still
 // framed at a plausible arm's length rather than at zero.
@@ -178,9 +189,26 @@ export function nearSplatDistance(centers?: Float32Array): number | null {
   return splatDistanceQuantile(centers, NEAR_ANCHOR_QUANTILE, NEAR_ANCHOR_STRIDE);
 }
 
+/**
+ * A name for the scene, whose extension decides how it is read.
+ *
+ * PlayCanvas picks the parser for a `gsplat` asset from the extension of the
+ * name it is given -- `ply`, `sog`, `json` -- so this is not cosmetic. Two
+ * kinds of address reach here today: the backend's `/api/scene/.../scene.ply`,
+ * whose last segment is already the right name, and a `blob:` URL the browser
+ * makes for a file opened from this machine. A blob URL carries no name at all,
+ * so it falls through to the default, which is right: the control that produces
+ * one accepts only `.ply`. A SOGS `meta.json` would come through the first
+ * case, named, when the backend starts serving one.
+ *
+ * Anything without an extension gets the same default rather than being passed
+ * on bare, because a name the engine cannot place is refused outright with
+ * "No parser found for resource".
+ */
 function resolveFilename(url: string): string {
   try {
-    return decodeURIComponent(new URL(url, window.location.href).pathname.split('/').pop() || 'scene.ply');
+    const last = decodeURIComponent(new URL(url, window.location.href).pathname.split('/').pop() || '');
+    return /\.[^./]+$/.test(last) ? last : 'scene.ply';
   } catch {
     return 'scene.ply';
   }
@@ -222,7 +250,6 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
   const anchorDistanceRef = useRef(DEFAULT_SUBJECT_DISTANCE);
   const splatEntityRef = useRef<pc.Entity | null>(null);
   const assetRef = useRef<pc.Asset | null>(null);
-  const sorterRef = useRef<SorterEvents | null>(null);
   const orbitRef = useRef<OrbitState>(createOrbitState());
   const drawnRef = useRef<OrbitState | null>(null);
   const stereoRef = useRef<StereoSettings>({
@@ -520,6 +547,24 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
         app.autoRender = false;
         appRef.current = app;
 
+        // ...with one exception, which is the engine asking. Sorting and
+        // streaming both finish after the frame that started them, so a scene
+        // that has just been asked for is not the scene that can be drawn yet.
+        // The gsplat system runs every frame whether or not one is rendered,
+        // and raises this when it has produced something a render would show.
+        // Without it the first frame lands before the first ordering does and
+        // nothing asks for another: a blank canvas.
+        const gsplatSystem = app.systems.gsplat;
+        if (gsplatSystem && FRAME_REQUEST) {
+          gsplatSystem.on(FRAME_REQUEST, forceRender);
+        } else {
+          // Every frame instead of only the ones that matter: more work than is
+          // needed, and the scene appears, which is the right way round. See
+          // FRAME_REQUEST_MISSING_ADVICE for what to do about it.
+          console.warn(FRAME_REQUEST_MISSING_ADVICE);
+          app.autoRender = true;
+        }
+
         // A rig carrying two eyes. The rig holds the orbit position and
         // orientation; each eye is displaced sideways within it and is never
         // rotated relative to the other, which is what keeps the pair fusable.
@@ -754,39 +799,21 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     let cancelled = false;
 
     const previous = assetRef.current;
-    const asset = new pc.Asset(resolveFilename(plyUrl), 'gsplat', { url: plyUrl });
+    // `filename` is what the engine reads the extension off; `url` is only
+    // where the bytes come from. Passing the URL alone leaves a blob: address
+    // as the name, and the load fails with "No parser found for resource".
+    const filename = resolveFilename(plyUrl);
+    const asset = new pc.Asset(filename, 'gsplat', { url: plyUrl, filename });
     asset.once('load', () => {
       if (cancelled) return;
       if (splat.gsplat) splat.removeComponent('gsplat');
       splat.addComponent('gsplat', { asset });
 
-      // Splats have to be drawn back to front, and that ordering is produced in
-      // a worker, so it lands a frame or more after the request. Drawing on
-      // demand and stopping there showed nothing at all: the one frame drawn
-      // after loading ran before the first ordering arrived, and nothing asked
-      // for another. Every completed ordering is a reason to draw, both for the
-      // first one and for each one that follows the camera moving.
-      //
-      // The sorter is not in the published types, hence the cast. That makes
-      // this the one place a PlayCanvas upgrade can break without any check
-      // noticing: on 2.21.4 `instance` returns null, because unified rendering
-      // is the default there and the component no longer exposes one. The cast
-      // still compiles, the sorter is simply never found, and with drawing on
-      // demand nothing ever asks for the frame -- a blank canvas and not one
-      // word anywhere. So say so, and keep drawing.
-      const sorter = (splat.gsplat?.instance as unknown as { sorter?: SorterEvents })?.sorter;
-      if (sorter) {
-        sorter.on('updated', forceRender);
-        sorterRef.current = sorter;
-        app.autoRender = false;
-      } else {
-        // Every frame instead of only the ones that matter: more work than is
-        // needed, and the scene appears, which is the right way round. See
-        // SORTER_MISSING_ADVICE for what to do about it.
-        console.warn(SORTER_MISSING_ADVICE);
-        app.autoRender = true;
-      }
-
+      // Nothing to subscribe to here: the cue to draw comes from the gsplat
+      // system rather than from this asset, and was wired up once when the app
+      // was created. The frame drawn just below will be the empty one -- the
+      // ordering has not been computed yet -- and the frame that shows the
+      // scene arrives when the engine asks for it.
       frameSceneToContent();
       forceRender();
       if (previous) {
@@ -803,8 +830,6 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
 
     return () => {
       cancelled = true;
-      sorterRef.current?.off('updated', forceRender);
-      sorterRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plyUrl, ready]);
@@ -826,8 +851,13 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
    */
   function frameSceneToContent() {
     const splat = splatEntityRef.current;
-    const instance = splat?.gsplat?.instance as { sorter?: { centers?: Float32Array } } | undefined;
-    const centers = instance?.sorter?.centers;
+    // The gaussian positions, xyz per splat, in the scene's own coordinates.
+    // The engine keeps a CPU copy because the sorter needs one; before unified
+    // rendering it was reachable only through that sorter, and is now a named
+    // property of the resource. `hasCenters` is checked first because reading
+    // `centers` on a resource that has none can allocate one.
+    const resource = splat?.gsplat?.resource;
+    const centers = resource?.hasCenters ? resource.centers : undefined;
     const distance = splatDistanceQuantile(centers, 0.5) ?? DEFAULT_SUBJECT_DISTANCE;
     anchorDistanceRef.current = nearSplatDistance(centers) ?? distance;
 
