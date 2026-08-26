@@ -391,6 +391,8 @@ export class HeadTracker {
   }) {
     this.video = video;
     this.baselineEyeZ = baselineEyeZ;
+    // Overridden by setPositionBound once the page knows its metric correction.
+    this.positionBound = 2.5;
     this.worldUnitMm = Number.isFinite(worldUnitMm) && worldUnitMm > 0 ? worldUnitMm : null;
     this.mirrorX = Boolean(mirrorX);
     this.xyGain = Number.isFinite(xyGain) && xyGain > 0 ? xyGain : DEFAULT_XY_GAIN;
@@ -450,6 +452,19 @@ export class HeadTracker {
       calibratedHeadXMm: this.metrics.calibratedHeadXMm,
       poseSource: this.metrics.poseSource,
     };
+  }
+
+  /**
+   * Widen the bound on the reported sideways and vertical position.
+   *
+   * The page corrects the tracker's metric scale afterwards, and a bound
+   * applied before that correction is a different bound: clamping to 2.5 and
+   * then multiplying by 0.5 stops at 1.25, not at 2.5. The page passes the
+   * reciprocal of its correction so the only bound that binds is the one it
+   * applies itself, on the corrected value.
+   */
+  setPositionBound(bound) {
+    if (Number.isFinite(bound) && bound > 0) this.positionBound = bound;
   }
 
   setViewingGeometry({ worldUnitMm, baselineEyeZ }) {
@@ -608,6 +623,8 @@ export class HeadTracker {
       ? mapMetricPoseToEyePose(observation.metric, this.calibration, {
         worldUnitMm: this.worldUnitMm,
         mirrorX: this.mirrorX,
+        minX: -this.positionBound, maxX: this.positionBound,
+        minY: -this.positionBound, maxY: this.positionBound,
       })
       : mapObservationToEyePose(observation, this.calibration, {
         mirrorX: this.mirrorX,

@@ -73,7 +73,9 @@ Open it on the phone at the address printed by `scripts/dev.sh`:
 
     https://<this machine>:5173/viewer.html
 
-It shows whatever the editor last produced. To name a scene explicitly, add `?job=<jobId>&name=<file>.ply`, or point it at any file with `?scene=<url>`.
+It shows whatever the editor last produced, and keeps up with it: make a new scene on the desktop and the phone picks it up within a few seconds, with no reload. To pin it to one scene instead, add `?job=<jobId>&name=<file>.ply`, or point it at any file with `?scene=<url>`; an address that names a scene is never overridden.
+
+Left to find the scene itself, the phone downloads a compressed copy, roughly a sixth of the size of the PLY the editor uses, so it is usable over mobile data. (An address that pins a particular `.ply` downloads that file, as asked.) The page shows how far through it is. The editor keeps the full file, so exported images never come from the compressed one. The copy is made with `splat-transform`, which arrives with the frontend's dependencies; if it cannot be run the phone is given the full file instead and the job log says why.
 
 **This has to be HTTPS.** Browsers only give a page the camera on a secure origin, and a plain `http://` address on a local network is not one. (`localhost` counts as secure, but on the phone that means the phone itself, not the machine running the server.) Two ways to get it, and the script prints the exact address to open either way:
 
@@ -99,7 +101,11 @@ Press **Start 3D** and hold still while it calibrates. iOS asks for the camera a
 
 **Reverse tracking** flips which way the view moves when you move your head, for a device that reports its front camera the other way round. It is remembered.
 
-A **pinch** crops into the frame. That is the only lever a small screen leaves: the whole photograph only looks life-sized about 12 cm from the eye, and cropping brings that out towards arm's length at the cost of the edges. The status line names the trade as you go. One finger slides the miniature; **Reset view** puts it back.
+A **pinch** sets how much of the frame is on screen. Spreading crops in, which is the only lever a small screen leaves: the whole photograph looks life-sized only from close up -- how close depends on the lens, and the readout names the distance for the scene you are holding -- and cropping brings that out towards arm's length at the cost of the edges. Pinching the other way pulls back to show more, which is how a photograph wider than the screen is seen whole; the page opens that way by itself when the shapes do not match. The status line names the trade as you go, and **Reset view** puts it back.
+
+**True window** decides where the picture is drawn from. On, it is drawn from where your eye actually is: shapes hold as you tilt the device, and what the glass shows is cropped as it goes deeper, the way a real window crops it. Off, the whole photograph stays on screen at every depth, and the cost is that shapes stretch towards the edges. On is the default.
+
+**Depth** slides the miniature further behind the glass, in steps. It sets how far back it sits and how widely it swings when you turn it with a finger -- nearer values keep the swing tight. It is not a depth-strength control: moving a whole scene away flattens it rather than deepening it.
 
 **Double tap** anywhere clears the controls and the readout away, and again brings them back. **Tap the readout** for the numbers the geometry is using, which is where to look if something seems wrong.
 
@@ -151,10 +157,9 @@ In the editor, the camera orbits the scene:
 On the phone, at `/viewer.html`, the camera is your head, so the scene is moved
 instead of the viewpoint:
 
-- One finger: slide the miniature within the frame
-- Two fingers apart or together: crop into the frame
-- Two fingers twisted: turn the miniature about its upright axis
-- Two fingers dragged up or down together: tip it toward or away from you, up to 55°
+- One finger: turn the miniature. Sideways spins it about its upright axis; up and down tips it toward or away from you, up to 55°. A diagonal does both at once.
+- Two fingers apart or together: show less or more of the frame
+- Two fingers slid together: slide the miniature within the frame
 - Double tap: hide or show the controls, and put the view back to where it started
 
 The stereo settings, which appear in side-by-side mode:
@@ -253,7 +258,9 @@ StereoSplatViewer は、外部の `ml-sharp` を使って単一の写真から 3
 
     https://<このマシン>:5173/viewer.html
 
-エディタが最後に作ったシーンが出ます。明示するなら `?job=<jobId>&name=<file>.ply`、任意のファイルなら `?scene=<url>` を付けます。
+エディタが最後に作ったシーンが出ます。**その後も追従します** — PC で新しいシーンを作れば、数秒でスマホ側にも切り替わります。リロードは不要です。1つに固定したいときは `?job=<jobId>&name=<file>.ply`、任意のファイルなら `?scene=<url>` を付けます。アドレスでシーンを指定した場合、自動追従に上書きされることはありません。
+
+シーンを自動で見つけさせた場合、スマホがダウンロードするのは圧縮版で、エディタが使う PLY のおよそ6分の1です。モバイル回線でも実用になります。（アドレスで `.ply` を名指しした場合は、指定どおりそのファイルを落とします。）進捗はページに出ます。エディタ側は元のファイルを使い続けるので、**書き出した画像が圧縮版を経由することはありません**。圧縮には `splat-transform` を使います。フロントエンドの依存関係に含まれているので追加インストールは不要ですが、実行できない場合はスマホにも元のファイルが渡り、理由がジョブのログに残ります。
 
 **HTTPS が必須です。** ブラウザはセキュアオリジンでしかカメラを許可せず、LAN の素の `http://` はこれに当たりません（`localhost` は例外ですが、スマートフォンで開いた `localhost` はそのスマートフォン自身です）。方法は2つあり、どちらも開くべきアドレスがそのまま表示されます。
 
@@ -279,7 +286,11 @@ StereoSplatViewer は、外部の `ml-sharp` を使って単一の写真から 3
 
 **Reverse tracking** は、頭を動かしたとき視点がどちらへ動くかを反転します。前面カメラの向きを逆に報告する端末のためのもので、記憶されます。
 
-**ピンチ**はフレームを切り取ります。小さい画面に残された唯一のつまみです — 写真全体が実物大に見えるのは目から約12cmで、切り取ることでそれを腕の長さに寄せられます。代償は画面の端が失われることで、その交換比はステータス行に常時出ます。1本指でミニチュアを平行移動、**Reset view** で戻ります。
+**ピンチ**は画面に入るフレームの量を決めます。広げると寄ります — 小さい画面に残された唯一のつまみです。写真全体が実物大に見える距離はかなり近く、レンズによって変わります（いま見ているシーンの値は表示に出ます）。切り取ることでそれを腕の長さに寄せられます。代償は端が失われることです。狭めると引きます。画面より横長の写真を全部見るにはこちらで、形が合わないときはページが自動でその状態から開きます。交換比はステータス行に常時出ます。**Reset view** で戻ります。
+
+**True window** は、絵をどこから描くかを決めます。オンなら**実際のあなたの目の位置**から描きます。端末を傾けても形が崩れず、ガラスの先は奥へ行くほど切り取られます — 本物の窓がそうであるように。オフなら写真全体がどの奥行きでも画面に収まりますが、代わりに端に近いほど形が伸びます。既定はオンです。
+
+**Depth** はミニチュアをガラスの奥へ、段階的に滑らせます。どれだけ奥に座るかと、指で回したときにどれだけ大きく振れるかが決まります。手前寄りの値ほど振れが小さくなります。立体感のつまみではありません — シーン全体を遠ざけると、深くなるのではなく平たくなります。
 
 **ダブルタップ**でボタンと表示が消え、もう一度で戻ります。**表示をタップ**すると幾何が使っている数値が出ます。何かおかしいときはここを見てください。
 
@@ -329,10 +340,9 @@ StereoSplatViewer は、外部の `ml-sharp` を使って単一の写真から 3
 
 スマートフォンの `/viewer.html` では、カメラはあなたの頭です。視点ではなく**シーンの側**を動かします。
 
-- 一本指: フレーム内で位置をずらす
-- 二本指を広げる／狭める: フレームに寄る
-- 二本指をひねる: 縦軸まわりに回す
-- 二本指を揃えて上下に: 手前／奥へ倒す（±55°まで）
+- 一本指: ミニチュアを回す。横で縦軸まわりに、上下で手前／奥へ倒します（±55°まで）。斜めなら両方同時に効きます。
+- 二本指を広げる／狭める: フレームに寄る／引く
+- 二本指を揃えて動かす: フレーム内で位置をずらす
 - ダブルタップ: ボタン類の表示を切り替え、同時に視点を初期状態へ戻す
 
 SBS 表示のときに出るステレオ設定は以下です。

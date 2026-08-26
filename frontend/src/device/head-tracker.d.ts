@@ -43,5 +43,7 @@ export class HeadTracker {
   recenter(): void;
   setMirrorX(mirrorX: boolean): void;
   setViewingGeometry(input: { worldUnitMm?: number | null; baselineEyeZ?: number }): void;
+  /** Widen the bound on reported sideways and vertical position. */
+  setPositionBound(bound: number): void;
   getMetrics(): HeadTrackerMetrics;
 }

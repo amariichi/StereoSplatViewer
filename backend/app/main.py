@@ -21,7 +21,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-from .services import focal, mlsharp, mode360, sharp_pool, sky, storage
+from .services import focal, mlsharp, mode360, sharp_pool, sky, sog, storage
 
 LOGGER = logging.getLogger(__name__)
 
@@ -110,6 +110,33 @@ def _persist_upload(job_id: str, upload: UploadFile) -> Path:
     return target
 
 
+def _compress_for_the_wire(job_id: str) -> None:
+    """
+    Make the small copy a phone should download, once the scene is final.
+
+    Deliberately here and not where each PLY is written. A 360 job writes seven
+    of them -- six cube faces, then the merged panorama -- and compressing at
+    that level ran the converter six times and left behind whichever face
+    happened to be last, unrotated, under the name the viewer asks for. The
+    scene is only finished once, so it is only compressed once, and the file
+    compressed is the same one `latest_job` will serve.
+
+    The status is written after this returns, so nothing is advertised as done
+    until the bundle beside it is complete.
+    """
+
+    try:
+        scene = storage.published_ply(job_id)
+        if scene is None:
+            return
+        sog.convert(scene, storage.sog_path(job_id), storage.stdout_log_path(job_id))
+    except Exception as exc:  # noqa: BLE001
+        # The scene is finished; this is only the small copy of it. Letting
+        # anything here escape would leave the job with no status written at
+        # all, which reads to every caller as still running, for ever.
+        LOGGER.warning("Could not compress the scene for %s: %s", job_id, exc)
+
+
 def _start_job(job_id: str, input_path: Path, mlsharp_cli: str | None) -> None:
     if mode360.is_360_filename(input_path.name):
         storage.write_status(job_id, {"status": "running", "message": "360 processing started"})
@@ -126,6 +153,7 @@ def _start_job(job_id: str, input_path: Path, mlsharp_cli: str | None) -> None:
         # Six faces with no merge is not a finished scene: nothing can be
         # previewed, so say that in the status rather than reporting success.
         if meta.get("mode360", {}).get("mergedPly"):
+            _compress_for_the_wire(job_id)
             storage.write_status(job_id, {"status": "done", "message": "360 scene merged"})
         else:
             storage.write_status(
@@ -149,6 +177,7 @@ def _start_job(job_id: str, input_path: Path, mlsharp_cli: str | None) -> None:
     except mlsharp.MlSharpError as exc:
         storage.write_status(job_id, {"status": "error", "message": str(exc)})
         return
+    _compress_for_the_wire(job_id)
     storage.write_status(job_id, {"status": "done", "message": "PLY generated"})
 
 
@@ -163,12 +192,15 @@ async def latest_scene() -> JSONResponse:
     latest = storage.latest_job()
     if latest is None:
         raise HTTPException(status_code=404, detail="no scene published yet")
-    return JSONResponse(
-        {
-            **latest,
-            "plyUrl": f"/api/scene/{latest['jobId']}/{latest['name']}",
-        }
-    )
+    # Both are offered and each caller picks. The editor wants the PLY, which
+    # is what its exports come from; the phone wants the small one.
+    payload = {
+        **latest,
+        "plyUrl": f"/api/scene/{latest['jobId']}/{latest['name']}",
+    }
+    if storage.sog_path(latest["jobId"]).is_file():
+        payload["sogUrl"] = f"/api/scene/{latest['jobId']}/scene.sog"
+    return JSONResponse(payload)
 
 
 @app.post("/api/upload")
@@ -257,6 +289,20 @@ def get_ply(job_id: str, ply_name: str) -> FileResponse:
     return FileResponse(ply_file, media_type="application/octet-stream")
 
 
+
+
+@app.get("/api/scene/{job_id}/scene.sog")
+def get_sog(job_id: str) -> FileResponse:
+    """The compressed scene, which is what a phone should be downloading.
+
+    About a sixth of the PLY. Absent when splat-transform could not be found or
+    could not run, in which case the viewer falls back to the PLY by itself.
+    """
+
+    sog_file = storage.sog_path(job_id)
+    if not sog_file.exists():
+        raise HTTPException(status_code=404, detail="no compressed scene for this job")
+    return FileResponse(sog_file, media_type="application/octet-stream")
 
 
 @app.get("/api/scene/{job_id}/logs")

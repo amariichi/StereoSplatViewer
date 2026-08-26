@@ -98,6 +98,12 @@ def ply_path(job_id: str) -> Path:
     return job_dir(job_id) / "scene.ply"
 
 
+def sog_path(job_id: str) -> Path:
+    """The same scene compressed for the wire. May not exist; the PLY always does."""
+
+    return job_dir(job_id) / "scene.sog"
+
+
 def metadata_path(job_id: str) -> Path:
     return job_dir(job_id) / "metadata.json"
 
@@ -145,8 +151,55 @@ def latest_job() -> dict[str, str] | None:
     if not candidates:
         return None
     newest = max(candidates, key=lambda d: d.stat().st_mtime)
-    # A job that is still running has a directory but no scene in it yet.
-    scenes = sorted(newest.glob("*.ply"))
-    if not scenes:
+    # Only a finished job. A PLY appears on disk before it has been compressed,
+    # and a viewer polling for the newest scene would otherwise start the large
+    # file, then be handed the small one moments later and fetch the scene
+    # twice -- on the connection this exists to spare.
+    status = read_status(newest.name)
+    if not status or status.get("status") != "done":
         return None
-    return {"jobId": newest.name, "name": scenes[0].name}
+    scene = published_ply(newest.name)
+    if scene is None:
+        return None
+    return {"jobId": newest.name, "name": scene.name}
+
+
+def published_ply(job_id: str) -> Path | None:
+    """
+    The PLY a viewer will be given for this job, or None while it has none.
+
+    A 360 job leaves seven of them in the directory -- one per cube face and
+    the merged panorama -- so "the scene" has to be a decision rather than a
+    guess, and it has to be the same decision everywhere. Serving one file and
+    compressing another is how a viewer ends up with a bundle that loads
+    perfectly and shows the wrong thing.
+    """
+
+    directory = job_dir(job_id)
+    if not directory.exists():
+        return None
+
+    # A 360 job leaves the six faces beside the panorama they were merged into,
+    # and only the metadata says which is which. Choosing alphabetically picked
+    # the panorama or a single face depending on how the uploaded file happened
+    # to be named -- `R0010069.360.jpg` sorted one way and `landscape.360.jpg`
+    # the other.
+    meta_file = directory / "metadata.json"
+    if meta_file.is_file():
+        try:
+            meta = json.loads(meta_file.read_text(encoding="utf-8"))
+            merged = meta.get("mode360", {}).get("mergedPly")
+        except (OSError, ValueError):
+            merged = None
+        if merged:
+            candidate = directory / Path(str(merged)).name
+            if candidate.is_file():
+                return candidate
+
+    # Otherwise the copy under the fixed name, which is the one every ordinary
+    # job writes; falling back to whatever is there for anything unforeseen.
+    canonical = directory / "scene.ply"
+    if canonical.is_file():
+        return canonical
+    scenes = sorted(directory.glob("*.ply"))
+    return scenes[0] if scenes else None

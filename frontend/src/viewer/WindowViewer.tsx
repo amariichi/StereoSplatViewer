@@ -38,6 +38,21 @@ import {
 
 const MIRROR_STORAGE_KEY = 'stereosplat-window-mirror-x-v1';
 
+/**
+ * How far the eye may be reported from where it was calibrated, in window
+ * units, where one unit is half the screen's height.
+ *
+ * A bound rather than a judgement about people: a tracker that has lost the
+ * face can report anything, and an eye a long way off the axis makes a very
+ * skewed view volume.
+ *
+ * The tracker is given this divided by the distance correction, because it
+ * clamps the uncorrected reading and this page clamps the corrected one.
+ * Applied in that order two bounds of the same size compose into a tighter
+ * one: a correction of a half would leave half the range.
+ */
+const EYE_BOUND = 2.5;
+
 function safeStorage(): Storage | null {
   try {
     return window.localStorage;
@@ -73,17 +88,24 @@ function sceneUrlFromLocation(): string | null {
 }
 
 /**
- * The scene the editor is holding, for when the address names none.
+ * Where this page should fetch the scene from.
  *
  * Opening this page on a phone should mean typing its address, not copying a
  * hexadecimal job identifier across by hand. Every upload clears the previous
  * one, so there is at most one scene and no ambiguity about which is meant.
+ *
+ * The server offers the same scene twice: a PLY, which is what the editor uses
+ * and what exports come from, and a SOG bundle, which is about a sixth of the
+ * size. This is the page that is opened over a mobile connection, so it takes
+ * the small one whenever there is one. `sogUrl` is absent when the compressor
+ * could not run, and then this falls back to what it always used.
  */
 async function latestSceneUrl(): Promise<string | null> {
   try {
     const response = await fetch('/api/scene/latest');
     if (!response.ok) return null;
     const body = await response.json();
+    if (typeof body?.sogUrl === 'string') return body.sogUrl;
     return typeof body?.plyUrl === 'string' ? body.plyUrl : null;
   } catch {
     return null;
@@ -135,6 +157,20 @@ export function WindowViewer() {
   const spinRef = useRef(0);
   const tipRef = useRef(0);
   const [zoom, setZoom] = useState(1);
+  // Null when nothing is downloading. A compressed scene is still about
+  // eleven megabytes and a mobile connection makes that a long silence.
+  const [sceneProgress, setSceneProgress] = useState<number | null>(null);
+  // Two controls for the projection itself, so the difference can be judged on
+  // a device rather than argued about. See HeadPose#trueWindow and #pushBack.
+  const [trueWindow, setTrueWindow] = useState(true);
+  // Sliding the miniature back settles how it sits behind the glass and how
+  // wide it swings when a finger turns it; 25 mm was chosen on a device for
+  // that. It does not make the scene look deeper -- moving a whole scene away
+  // flattens it, because the DIFFERENCE in how two depths move is what reads
+  // as relief and that difference shrinks. Deeper steps come first, since that
+  // is the direction anyone pressing this is going.
+  const PUSH_STEPS_MM = [25, 50, 100, 200, 0];
+  const [pushMm, setPushMm] = useState(25);
   const [placement, setPlacement] = useState<
     { windowHalfHeight: number; visibleFraction: number; eyeDistance: number } | null>(null);
   // What the tracker says the head is at, so a distance judged by eye can be
@@ -163,6 +199,14 @@ export function WindowViewer() {
   const startLevellingRef = useRef<(() => Promise<void>) | null>(null);
   const startTrackingRef = useRef<(() => Promise<void>) | null>(null);
 
+  // Bumped by everything that chooses a scene, so an answer to an older
+  // request can tell that it has been overtaken.
+  const sceneGenerationRef = useRef(0);
+  const trueWindowRef = useRef(true);
+  const pushMmRef = useRef(0);
+  useEffect(() => { trueWindowRef.current = trueWindow; }, [trueWindow]);
+  useEffect(() => { pushMmRef.current = pushMm; }, [pushMm]);
+
   const publishPose = useCallback(() => {
     setPose({
       eye: { ...eyeRef.current },
@@ -173,22 +217,38 @@ export function WindowViewer() {
       pan: { ...panRef.current },
       spin: spinRef.current,
       tip: tipRef.current,
+      trueWindow: trueWindowRef.current,
+      pushBack: pushMmRef.current / geometry.viewing.worldUnitMm,
     });
-  }, [geometry.viewing.baselineEyeZ]);
+  }, [geometry.viewing.baselineEyeZ, geometry.viewing.worldUnitMm]);
 
   useEffect(() => {
     publishPose();
-  }, [publishPose]);
+  }, [publishPose, trueWindow, pushMm]);
 
-  // Nothing in the address: ask the editor what it is holding.
+  // Nothing in the address: ask the editor what it is holding, and keep
+  // asking. A scene made on the desktop lands under a new job id, so the URL
+  // changes and this picks it up without anyone reloading the page by hand.
+  // The poll is one small JSON request; the scene itself is only fetched when
+  // the answer is different from what is already on screen.
   useEffect(() => {
-    if (sceneUrl) return;
+    // An address that names a scene means it: nothing here overrides it.
+    if (sceneUrlFromLocation()) return undefined;
     let cancelled = false;
-    latestSceneUrl().then((url) => {
-      if (!cancelled && url) setSceneUrl(url);
-    });
-    return () => { cancelled = true; };
-  }, [sceneUrl]);
+    const check = () => {
+      // A poll that is still out cannot be allowed to answer for a scene
+      // chosen since it left -- pasting one sets the scene directly, and the
+      // reply to a request made before that would put the old one back.
+      const mine = ++sceneGenerationRef.current;
+      latestSceneUrl().then((url) => {
+        if (cancelled || mine !== sceneGenerationRef.current || !url) return;
+        setSceneUrl((current) => (url === current ? current : url));
+      });
+    };
+    check();
+    const timer = window.setInterval(check, 5000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
 
   // A development hook for driving the eye without a camera, so the parallax
   // can be checked from a script. Vite strips this from a production build.
@@ -211,16 +271,36 @@ export function WindowViewer() {
       mirrorX,
       onStatus: (next: { code: string; message: string }) => setStatus(next),
       onPose: (next: { x: number; y: number; z: number }) => {
-        // Only the distance is corrected. Sideways and vertical positions are
-        // differences from the calibration pose, so a scale error in the
-        // absolute distance does not carry into them.
-        const corrected = next.z * distanceScaleRef.current;
-        eyeRef.current = { x: next.x, y: next.y, z: corrected };
+        // All three axes are corrected, not just the distance.
+        //
+        // This used to correct the distance alone, reasoning that sideways and
+        // vertical positions are differences from the calibration pose so an
+        // error in the absolute distance could not reach them. That holds for
+        // an error that is an offset. The one being corrected here is not:
+        // head-distance-calibration.ts says so in its first line, because the
+        // tracker infers distance from an assumed face size and getting that
+        // size wrong scales everything it reports. A scale survives the
+        // subtraction --  (c*y - c*y_ref) is c*(y - y_ref) --  so correcting z
+        // alone left the ratio |y|/z wrong by 1/scale, and that ratio is
+        // exactly what decides how far off the view axis the eye is, and so
+        // how much the picture is stretched at the edges.
+        const scale = distanceScaleRef.current;
+        // The bound the tracker applies is on the eye's position, so it is
+        // reapplied here rather than left behind by the correction.
+        const bound = (v: number) => Math.min(Math.max(v * scale, -EYE_BOUND), EYE_BOUND);
+        const corrected = next.z * scale;
+        eyeRef.current = { x: bound(next.x), y: bound(next.y), z: corrected };
         rawHeadMmRef.current = next.z * geometry.viewing.worldUnitMm;
         setHeadMm(corrected * geometry.viewing.worldUnitMm);
         publishPose();
       },
     });
+    // The bound on sideways movement has to be applied once, and after the
+    // metric correction below, or the two compose into a tighter one. It has
+    // to be kept up to date as well: calibrating happens while the tracker is
+    // already running, so a bound set only at creation is the wrong one from
+    // the first time anyone presses the button.
+    tracker.setPositionBound?.(EYE_BOUND / Math.max(distanceScaleRef.current, 1e-3));
     try {
       // Kept out of the ref until it is actually running. Assigning first left
       // a half-started tracker behind whenever the camera was refused or the
@@ -320,10 +400,10 @@ export function WindowViewer() {
       setZoom(zoomRef.current);
     }
     if (gesture.twistDeg) {
-      // Turning two fingers turns the miniature about its upright axis. The
-      // head keeps deciding where the view is from; this decides which side of
-      // the thing is facing the glass. Geared up, because fingers cannot turn
-      // as far as the scene needs to.
+      // Sliding one finger sideways turns the miniature about its upright
+      // axis. The head keeps deciding where the view is from; this decides
+      // which side of the thing is facing the glass. Geared up, because a
+      // comfortable stroke is shorter than the turn people want from it.
       spinRef.current = (spinRef.current + gesture.twistDeg * TWIST_GAIN) % 360;
     }
     if (gesture.tipDeg) {
@@ -366,6 +446,11 @@ export function WindowViewer() {
     distanceScaleRef.current = next;
     setDistanceScale(next);
     saveDistanceScale(safeStorage(), next);
+    // The tracker's own bound is expressed against the uncorrected reading, so
+    // it moves with this. Without it, correcting by a half leaves half the
+    // sideways range, and the first calibration always happens after the
+    // tracker was created.
+    trackerRef.current?.setPositionBound?.(EYE_BOUND / Math.max(next, 1e-3));
     setError(null);
   }, []);
 
@@ -398,7 +483,14 @@ export function WindowViewer() {
         if (status.status === 'error') throw new Error(status.message || 'the backend failed');
       }
       setBuilding('Loading the scene');
-      setSceneUrl(job.plyUrl);
+      // Ask what the server would serve rather than taking the upload's own
+      // answer. The upload replies before the scene exists and so can only name
+      // the full PLY; by now the compressed copy is beside it, and on a phone
+      // the difference is about eleven megabytes against sixty-six. Without
+      // this the page loads the large one and the poll then replaces it with
+      // the small one, downloading the scene twice.
+      sceneGenerationRef.current += 1;
+      setSceneUrl((await latestSceneUrl()) ?? job.plyUrl);
 
       // Somebody who pasted a picture in order to look at it in three
       // dimensions does not also need to say so. This only reaches the camera
@@ -445,6 +537,41 @@ export function WindowViewer() {
     return () => window.removeEventListener('paste', onPaste);
   }, [buildSceneFrom]);
 
+  /**
+   * Open showing the whole frame, not just its middle.
+   *
+   * The scene is fitted to the frame's height, so the window keeps the screen's
+   * own proportions and a photograph wider than the screen loses its sides
+   * before anything else happens -- a third of the width for a landscape
+   * photograph held upright.
+   *
+   * Zooming out grows the virtual window past the physical glass until the
+   * width fits. That is a real departure from a literal window and not a small
+   * correction to one: the picture is built for a larger pane and shown on a
+   * smaller, so everything on it, the response to head movement included, is
+   * scaled down with it. It is a trade -- the whole frame against exactness --
+   * and worth making when the alternative is losing a third of the picture.
+   *
+   * The estimate it works from is a heuristic. It measures how far the
+   * surviving gaussians spread sideways against how far they spread vertically,
+   * which is the photograph's shape only to the extent that the reconstruction
+   * fills its frame; on the sample used to develop this it came out about eight
+   * per cent wide. Erring that way costs a little extra margin, not content.
+   *
+   * Only the opening view. A pinch afterwards is the viewer's own choice and
+   * this does not fight it, because it runs when a scene arrives and not again.
+   */
+  const fitZoomToAspect = useCallback((aspect: number | null) => {
+    if (!aspect || !Number.isFinite(aspect)) return;
+    const canvasAspect = window.innerWidth / Math.max(1, window.innerHeight);
+    const fitted = Math.min(1, canvasAspect / aspect);
+    const clamped = Math.min(Math.max(fitted, MIN_ZOOM), MAX_ZOOM);
+    if (Math.abs(clamped - zoomRef.current) < 1e-3) return;
+    zoomRef.current = clamped;
+    setZoom(clamped);
+    publishPose();
+  }, [publishPose]);
+
   const toggleMirror = useCallback(() => {
     setMirrorX((previous) => {
       const next = !previous;
@@ -457,7 +584,7 @@ export function WindowViewer() {
   const geometryNote = `${geometry.metrics.label} · ${geometry.viewing.screenHeightMm.toFixed(0)} mm tall`
     + (headMm !== null ? ` · head at ${headMm.toFixed(0)} mm` : ` · assuming ${geometry.viewing.viewingDistanceMm.toFixed(0)} mm`)
     + (placement
-      ? ` · shows ${(placement.visibleFraction * 100).toFixed(0)}% of the frame`
+      ? ` · far field ${(placement.visibleFraction * 100).toFixed(0)}% tall`
         + ` · life-sized at ${lifeSizeDistanceMm(
           placement.windowHalfHeight,
           placement.eyeDistance,
@@ -491,6 +618,8 @@ export function WindowViewer() {
             headPose={pose}
             onGesture={handleGesture}
             onPlacement={setPlacement}
+            onSceneProgress={setSceneProgress}
+            onSceneAspect={fitZoomToAspect}
           />
         ) : null}
       </div>
@@ -505,7 +634,7 @@ export function WindowViewer() {
         title="Tap for the numbers the geometry is using"
         onClick={() => setShowDetail((v) => !v)}
       >
-        {sceneUrl ? `${status.message}\n${geometryNote}` : 'No scene yet. Upload one in the editor, then reload this page.'}
+        {sceneUrl ? `${status.message}\n${geometryNote}` : 'No scene yet. Make one in the editor and it will appear here, or paste a picture below.'}
         {showDetail && (
           '\n\n' + [
             `screen  ${geometry.metrics.source} · ${geometry.metrics.mmPerCssPx.toFixed(4)} mm per css px`,
@@ -523,15 +652,35 @@ export function WindowViewer() {
         )}
       </button>
 
-      {building && (
+      {(building || sceneProgress !== null) && (
         <div className="window-viewer__building">
           <div className="window-viewer__spinner" />
-          <div className="window-viewer__building-text">{building}</div>
-          <div className="window-viewer__building-note">This takes a little while.</div>
+          <div className="window-viewer__building-text">
+            {building ?? 'Downloading the scene'}
+          </div>
+          <div className="window-viewer__building-note">
+            {building
+              ? 'This takes a little while.'
+              : `${Math.round((sceneProgress ?? 0) * 100)}%`}
+          </div>
         </div>
       )}
 
-      {error && <div className="window-viewer__error">{error}</div>}
+      {/* Several of these are notices rather than failures -- refused motion
+          access, for one, which leaves the view working. All of them used to
+          stay on screen for the rest of the session with no way to clear them. */}
+      {error && (
+        <div
+          className="window-viewer__error"
+          role="button"
+          tabIndex={0}
+          title="Tap to dismiss"
+          onClick={() => setError(null)}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setError(null); }}
+        >
+          {error}
+        </div>
+      )}
 
       <div className="window-viewer__bar">
         {!tracking ? (
@@ -565,11 +714,24 @@ export function WindowViewer() {
             I am at {geometry.viewing.viewingDistanceMm.toFixed(0)} mm
           </button>
         )}
+        <button type="button" className={trueWindow ? 'on' : ''}
+          title="Build the view from where your eye actually is. Faces stop stretching toward the edges; the frame is cropped with depth, as a window crops it."
+          onClick={() => setTrueWindow((v) => !v)}>
+          True window {trueWindow ? 'on' : 'off'}
+        </button>
+        <button type="button" className={pushMm ? 'on' : ''}
+          title="Slide the whole miniature further behind the glass. More of it fits and it swings less when you turn it, at the cost of apparent size. It does not make the scene deeper."
+          onClick={() => setPushMm((v) => {
+            const i = PUSH_STEPS_MM.indexOf(v);
+            return PUSH_STEPS_MM[(i < 0 ? 0 : i + 1) % PUSH_STEPS_MM.length];
+          })}>
+          Depth {pushMm ? `${pushMm} mm` : 'off'}
+        </button>
         <button type="button" onClick={pasteFromClipboard} disabled={building !== null}
           title="Turn the image on the clipboard into a scene">
           Paste image
         </button>
-        {(zoom !== 1 || pose?.pan?.x || pose?.pan?.y) ? (
+        {(zoom !== 1 || pose?.pan?.x || pose?.pan?.y || pose?.spin || pose?.tip) ? (
           <button type="button" onClick={resetView}>Reset view</button>
         ) : null}
       </div>
