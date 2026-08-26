@@ -110,6 +110,23 @@ def _persist_upload(job_id: str, upload: UploadFile) -> Path:
     return target
 
 
+# A scene never changes once it exists. Every upload clears the data root and
+# takes a fresh job identifier, so a given URL under /api/scene/<jobId>/ names
+# one set of bytes for as long as it names anything at all -- which is what
+# `immutable` promises, and it is the difference between a phone that comes
+# back from standby instantly and one that downloads eleven megabytes again.
+#
+# Without a directive the decision is left to the browser's own heuristics.
+# Chrome kept the file; iOS Safari, where this matters most, is conservative
+# about holding something that large on a guess.
+_FOREVER = "public, max-age=31536000, immutable"
+
+# And its opposite, for the handful of answers that are about right now. The
+# viewer polls the first of these to notice a new scene, so caching it would
+# freeze the page on whatever was current when it was first asked.
+_NEVER = "no-store"
+
+
 def _compress_for_the_wire(job_id: str) -> None:
     """
     Make the small copy a phone should download, once the scene is final.
@@ -200,7 +217,7 @@ async def latest_scene() -> JSONResponse:
     }
     if storage.sog_path(latest["jobId"]).is_file():
         payload["sogUrl"] = f"/api/scene/{latest['jobId']}/scene.sog"
-    return JSONResponse(payload)
+    return JSONResponse(payload, headers={"Cache-Control": _NEVER})
 
 
 @app.post("/api/upload")
@@ -272,7 +289,7 @@ def get_status(job_id: str) -> JSONResponse:
     status = storage.read_status(job_id)
     if status is None:
         raise HTTPException(status_code=404, detail="job not found")
-    return JSONResponse(status)
+    return JSONResponse(status, headers={"Cache-Control": _NEVER})
 
 
 @app.get("/api/scene/{job_id}/{ply_name}.ply")
@@ -286,7 +303,11 @@ def get_ply(job_id: str, ply_name: str) -> FileResponse:
         if status and status.get("status") == "error":
             detail = f"job failed: {status.get('message', '')}"
         raise HTTPException(status_code=404, detail=detail)
-    return FileResponse(ply_file, media_type="application/octet-stream")
+    return FileResponse(
+        ply_file,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": _FOREVER},
+    )
 
 
 
@@ -302,7 +323,11 @@ def get_sog(job_id: str) -> FileResponse:
     sog_file = storage.sog_path(job_id)
     if not sog_file.exists():
         raise HTTPException(status_code=404, detail="no compressed scene for this job")
-    return FileResponse(sog_file, media_type="application/octet-stream")
+    return FileResponse(
+        sog_file,
+        media_type="application/octet-stream",
+        headers={"Cache-Control": _FOREVER},
+    )
 
 
 @app.get("/api/scene/{job_id}/logs")
@@ -313,7 +338,10 @@ def get_logs(job_id: str) -> JSONResponse:
         raise HTTPException(status_code=404, detail="logs not found")
     stdout_text = stdout_path.read_text(encoding="utf-8") if stdout_path.exists() else ""
     stderr_text = stderr_path.read_text(encoding="utf-8") if stderr_path.exists() else ""
-    return JSONResponse({"stdout": stdout_text, "stderr": stderr_text})
+    return JSONResponse(
+        {"stdout": stdout_text, "stderr": stderr_text},
+        headers={"Cache-Control": _NEVER},
+    )
 
 
 @app.get("/api/scene/{job_id}/metadata.json")
@@ -321,4 +349,8 @@ def get_metadata(job_id: str) -> FileResponse:
     metadata_path = storage.metadata_path(job_id)
     if not metadata_path.exists():
         raise HTTPException(status_code=404, detail="metadata not found")
-    return FileResponse(metadata_path, media_type="application/json")
+    return FileResponse(
+        metadata_path,
+        media_type="application/json",
+        headers={"Cache-Control": _FOREVER},
+    )
