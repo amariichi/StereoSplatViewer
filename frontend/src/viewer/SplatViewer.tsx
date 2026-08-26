@@ -11,7 +11,13 @@ import * as pc from 'playcanvas';
 
 import type { StereoSettings, ViewerHandle } from '../types';
 import { computeOffAxisFrustum, computeStereoEye, effectiveBaseline, sanitizeEye } from './off-axis';
-import { apexDistance, computeWindowPlacement, estimateCaptureTangent, mapTrackedEye } from './window-placement';
+import {
+  apexDistance,
+  computeWindowPlacement,
+  estimateCaptureAspect,
+  estimateCaptureTangent,
+  mapTrackedEye,
+} from './window-placement';
 import {
   type OrbitState,
   applyDolly,
@@ -76,6 +82,45 @@ export type HeadPose = {
    * tipping past a certain point only shows the absence.
    */
   tip?: number;
+  /**
+   * Build the view volume from where the eye actually is.
+   *
+   * The alternative, and the older behaviour, is to move the eye onto the
+   * apex -- the point from which the reconstruction reproduces its source
+   * photograph -- so that the whole frame is on screen at every depth. That
+   * costs the one property a window has to have: the pre-distortion a flat
+   * off-axis projection puts into the picture is cancelled by looking at the
+   * screen from the angle it was built for, and only then. The angle it is
+   * built for is the photograph's own, which is wide -- a phone held at arm's
+   * length spans a small fraction of it -- so most of the pre-distortion
+   * survives, and it survives hardest where the angle is largest. That is why
+   * a face stretches as it moves toward an edge.
+   *
+   * With this set the eye is used as measured. Nothing is pre-distorted that
+   * the viewing angle will not undo. The price is that the frame is no longer
+   * whole at every depth: content on the glass is all there, and the further
+   * back it sits the more the window crops it, which is what a window does.
+   */
+  trueWindow?: boolean;
+  /**
+   * How far behind the glass to slide the whole miniature, in window units.
+   *
+   * The nearest content is placed on the glass by default. Sliding it back
+   * lets the view volume, which widens with depth, take in more of the scene,
+   * and settles how widely the miniature swings when it is turned, since it is
+   * turned about the centre of the window rather than about itself. It costs
+   * apparent size.
+   *
+   * It is not a depth control, whatever it looks like. Moving the whole scene
+   * away raises how far everything in it travels when the head moves, and
+   * lowers the DIFFERENCE between what near and far parts travel -- and only
+   * that difference reads as depth. A scene slid back is flatter, not deeper.
+   *
+   * Nothing is scaled: this is a translation, which is why it is not
+   * `sizeScale` -- that grows the miniature as it moves it back, and the growth
+   * outruns the extra room.
+   */
+  pushBack?: number;
 };
 
 type Props = {
@@ -100,6 +145,23 @@ type Props = {
   onPlacement?: (placement: {
     windowHalfHeight: number; visibleFraction: number; eyeDistance: number;
   }) => void;
+  /**
+   * How far through downloading the scene we are, 0 to 1, and null when there
+   * is nothing in flight.
+   *
+   * A compressed scene is still about eleven megabytes, which over a mobile
+   * connection is long enough that a viewer with no indication of progress
+   * reasonably concludes the thing is broken. It was reported exactly that
+   * way: "still black".
+   */
+  onSceneProgress?: (fraction: number | null) => void;
+  /**
+   * How wide the photograph is against how tall, once a scene has loaded.
+   *
+   * The window is fitted to the frame's height, so a page that knows this can
+   * open at a zoom that shows the width as well instead of cutting it.
+   */
+  onSceneAspect?: (aspect: number | null) => void;
 };
 
 /**
@@ -230,6 +292,8 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     headPose = null,
     onGesture,
     onPlacement,
+    onSceneProgress,
+    onSceneAspect,
   },
   ref,
 ) {
@@ -245,6 +309,10 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
   onGestureRef.current = onGesture;
   const onPlacementRef = useRef(onPlacement);
   onPlacementRef.current = onPlacement;
+  const onSceneProgressRef = useRef(onSceneProgress);
+  onSceneProgressRef.current = onSceneProgress;
+  const onSceneAspectRef = useRef(onSceneAspect);
+  onSceneAspectRef.current = onSceneAspect;
   const captureTangentRef = useRef<number | null>(null);
   const subjectDistanceRef = useRef(DEFAULT_SUBJECT_DISTANCE);
   const anchorDistanceRef = useRef(DEFAULT_SUBJECT_DISTANCE);
@@ -294,7 +362,16 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     splat.setLocalPosition(
       placement.translation.x + (pose.pan?.x ?? 0),
       placement.translation.y + (pose.pan?.y ?? 0),
-      placement.translation.z,
+      // Away from the eye, so the nearest content leaves the glass and the
+      // whole miniature sits deeper behind it.
+      //
+      // Bounded short of the apex. Turning the miniature rotates it about the
+      // centre of the window, so what this offset really sets is the radius of
+      // that swing -- and past the apex the offset changes sign, which turns
+      // the swing inside out and can bring the scene through the glass toward
+      // the viewer. The deeper steps therefore saturate on a wide-angle scene,
+      // whose apex is close in.
+      placement.translation.z - Math.min(pose.pushBack ?? 0, placement.translation.z * 0.9),
     );
   }, []);
 
@@ -323,7 +400,7 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     // measures sideways movement against an apex nearer than the device really
     // is, which multiplies the parallax and was reported as depth that felt
     // exaggerated and unpleasant.
-    const eye = sanitizeEye(tangent
+    const eye = sanitizeEye(tangent && !pose.trueWindow
       ? mapTrackedEye({
         eye: pose.eye,
         nominalZ: pose.screenDistance,
@@ -683,21 +760,13 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
       if (points.length < 2) return 0;
       return Math.hypot(points[0].x - points[1].x, points[0].y - points[1].y);
     };
-    // The angle of the line between two touches. Turning that line turns the
-    // miniature; the distance between them scales it. Both come from the same
-    // pair of fingers without either getting in the other's way.
-    const twistAngle = () => {
-      const points = [...pointers.values()];
-      if (points.length < 2) return null;
-      return Math.atan2(points[1].y - points[0].y, points[1].x - points[0].x);
-    };
     // Where the pair of touches sits as a whole. Sliding both fingers together
-    // moves this without changing either their separation or their angle, so
-    // tipping is independent of zooming and turning even when they overlap.
-    const midpointY = () => {
+    // moves this without changing their separation, so sliding the miniature
+    // within the frame is independent of zooming even when they overlap.
+    const midpoint = () => {
       const points = [...pointers.values()];
       if (points.length < 2) return null;
-      return (points[0].y + points[1].y) / 2;
+      return { x: (points[0].x + points[1].x) / 2, y: (points[0].y + points[1].y) / 2 };
     };
 
     const onMove = (event: PointerEvent) => {
@@ -706,49 +775,48 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
       const dx = event.clientX - previous.x;
       const dy = event.clientY - previous.y;
       const before = spread();
-      const beforeAngle = twistAngle();
-      const beforeMidY = midpointY();
+      const beforeMid = midpoint();
       pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
       const rect = container.getBoundingClientRect();
 
       // A window cannot be orbited: the viewpoint is where the viewer's head
-      // is. One finger slides the miniature within the frame, and a pinch
-      // changes how much relief it has -- which is what scale means once the
-      // capture camera sits on the eye.
+      // is. What one finger does instead is turn the thing behind the glass,
+      // the way you would turn an object you were holding -- sideways for its
+      // upright axis, up and down for its tip. One gesture, two axes, so a
+      // diagonal does both at once without being a third thing to learn.
+      //
+      // This replaced turning two fingers against each other. A hand cannot
+      // twist far, which needed a gain of three to reach half a turn, and it
+      // shared the pair with the pinch, so turning and zooming interfered.
+      // Both axes are scaled by the same span -- a drag of the frame's height
+      // is a quarter turn before the gain -- so a diagonal is even-handed.
       if (headPoseRef.current) {
         if (pointers.size >= 2) {
           const after = spread();
-          const afterAngle = twistAngle();
-          const afterMidY = midpointY();
-          const gesture: { pinch?: number; twistDeg?: number; tipDeg?: number } = {};
+          const afterMid = midpoint();
+          const gesture: { pinch?: number; panX?: number; panY?: number } = {};
           if (before > 0 && after > 0) gesture.pinch = after / before;
-          if (beforeAngle !== null && afterAngle !== null) {
-            // Unwrap across the half turn, or a hand crossing that boundary
-            // would send the miniature spinning the long way round.
-            let delta = afterAngle - beforeAngle;
-            while (delta > Math.PI) delta -= 2 * Math.PI;
-            while (delta < -Math.PI) delta += 2 * Math.PI;
-            if (delta !== 0) gesture.twistDeg = (delta * 180) / Math.PI;
+          if (beforeMid && afterMid && rect.height > 0) {
+            // Two fingers together slide the miniature within the frame, which
+            // is where one finger used to do it.
+            const px = (afterMid.x - beforeMid.x) / rect.height;
+            const py = (afterMid.y - beforeMid.y) / rect.height;
+            if (px !== 0) gesture.panX = px * 2 * windowHalfHeightRef.current;
+            if (py !== 0) gesture.panY = -py * 2 * windowHalfHeightRef.current;
           }
-          if (beforeMidY !== null && afterMidY !== null && rect.height > 0) {
-            // Dragging the pair down tips the top toward you, which is the way
-            // round it goes when you tilt something you are holding. A drag of
-            // the full height is a quarter turn before the gain.
-            const travel = (afterMidY - beforeMidY) / rect.height;
-            if (travel !== 0) gesture.tipDeg = travel * 90;
-          }
-          if (
-            gesture.pinch !== undefined
-            || gesture.twistDeg !== undefined
-            || gesture.tipDeg !== undefined
-          ) {
+          if (gesture.pinch !== undefined || gesture.panX !== undefined
+            || gesture.panY !== undefined) {
             onGestureRef.current?.(gesture);
           }
         } else if (rect.height > 0) {
-          onGestureRef.current?.({
-            panX: (dx / rect.height) * 2 * windowHalfHeightRef.current,
-            panY: (-dy / rect.height) * 2 * windowHalfHeightRef.current,
-          });
+          const gesture: { twistDeg?: number; tipDeg?: number } = {};
+          if (dx !== 0) gesture.twistDeg = (dx / rect.height) * 90;
+          // Dragging down tips the top toward you, which is the way round it
+          // goes when you tilt something you are holding.
+          if (dy !== 0) gesture.tipDeg = (dy / rect.height) * 90;
+          if (gesture.twistDeg !== undefined || gesture.tipDeg !== undefined) {
+            onGestureRef.current?.(gesture);
+          }
         }
         return;
       }
@@ -804,8 +872,22 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     // as the name, and the load fails with "No parser found for resource".
     const filename = resolveFilename(plyUrl);
     const asset = new pc.Asset(filename, 'gsplat', { url: plyUrl, filename });
-    asset.once('load', () => {
+    // The engine reports this from inside its own reader for both the plain
+    // PLY and the compressed bundle, so it costs nothing to pass on. Every
+    // handler checks `cancelled` first: a scene that has been replaced keeps
+    // downloading until the browser drops it, and its eventual load, error or
+    // last progress tick must not speak for the one now on screen.
+    onSceneProgressRef.current?.(0);
+    const onProgress = (received: number, total: number) => {
       if (cancelled) return;
+      onSceneProgressRef.current?.(total > 0 ? Math.min(1, received / total) : 0);
+    };
+    const onLoad = () => {
+      if (cancelled) return;
+      onSceneProgressRef.current?.(null);
+      // A scene that failed leaves its complaint on screen, and the next one
+      // succeeding is the answer to it.
+      setError(null);
       if (splat.gsplat) splat.removeComponent('gsplat');
       splat.addComponent('gsplat', { asset });
 
@@ -821,15 +903,39 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
         previous.unload();
       }
       assetRef.current = asset;
-    });
-    asset.once('error', (err: string) => {
-      if (!cancelled) setError(`Failed to load ${resolveFilename(plyUrl)}: ${err}`);
-    });
+    };
+    const onLoadError = (err: string) => {
+      if (cancelled) return;
+      onSceneProgressRef.current?.(null);
+      // The asset stays in the registry otherwise, holding whatever it read.
+      app.assets.remove(asset);
+      asset.unload();
+      setError(`Failed to load ${resolveFilename(plyUrl)}: ${err}`);
+    };
+    asset.on('progress', onProgress);
+    asset.once('load', onLoad);
+    asset.once('error', onLoadError);
     app.assets.add(asset);
     app.assets.load(asset);
 
     return () => {
       cancelled = true;
+      asset.off('progress', onProgress);
+      asset.off('load', onLoad);
+      asset.off('error', onLoadError);
+      // Only if it never became the scene on screen: the one that did is owned
+      // by assetRef and released when its replacement loads.
+      //
+      // This takes it out of the registry so nothing reaches it again. It does
+      // not stop the download: PlayCanvas's `unload` returns immediately for an
+      // asset that has not finished, and the engine offers no way to abandon a
+      // request in flight. A scene replaced while it was still arriving
+      // therefore goes on arriving, to nowhere.
+      if (assetRef.current !== asset) {
+        app.assets.remove(asset);
+        asset.unload();
+      }
+      onSceneProgressRef.current?.(null);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plyUrl, ready]);
@@ -862,6 +968,7 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     anchorDistanceRef.current = nearSplatDistance(centers) ?? distance;
 
     captureTangentRef.current = estimateCaptureTangent(centers);
+    onSceneAspectRef.current?.(estimateCaptureAspect(centers));
     subjectDistanceRef.current = distance;
 
     if (headPoseRef.current && splat) {

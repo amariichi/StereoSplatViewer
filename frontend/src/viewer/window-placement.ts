@@ -25,21 +25,52 @@ export type Vec3 = { x: number; y: number; z: number };
  */
 export function estimateCaptureTangent(
   centers: Float32Array | undefined,
-  { stride = 64, percentile = 0.98 }: { stride?: number; percentile?: number } = {},
+  { stride = 64, percentile = 0.98, axis = 'y' }:
+    { stride?: number; percentile?: number; axis?: 'x' | 'y' } = {},
 ): number | null {
   if (!centers || centers.length < 3) return null;
+  const offset = axis === 'x' ? 0 : 1;
   const ratios: number[] = [];
   for (let i = 0; i + 2 < centers.length; i += 3 * stride) {
-    const y = centers[i + 1];
+    const across = centers[i + offset];
     const z = centers[i + 2];
     const depth = Math.abs(z);
     // Very near the camera the ratio explodes and means nothing.
-    if (depth > 1e-3) ratios.push(Math.abs(y) / depth);
+    if (depth > 1e-3) ratios.push(Math.abs(across) / depth);
   }
   if (ratios.length === 0) return null;
   ratios.sort((a, b) => a - b);
   const value = ratios[Math.min(ratios.length - 1, Math.floor(ratios.length * percentile))];
   return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * How wide the reconstruction spreads against how tall, read off the gaussians.
+ *
+ * A heuristic, and named for what it is wanted for rather than for what it
+ * measures. It is the ratio of two percentiles of the splats' own angular
+ * spread, and that equals the photograph's shape only in so far as the
+ * reconstruction reaches the edges of its frame; on the sample used to develop
+ * this it came out about eight per cent wide. Erring wide leaves a little
+ * unused margin around the picture, which is the harmless direction to err.
+ *
+ * It is wanted because the placement fits the frame's HEIGHT to the window and
+ * lets the width fall where it may, which is fine while the two have similar
+ * proportions and is not fine otherwise. A phone held upright is about 0.46
+ * wide per tall; an ordinary portrait photograph is 0.79 and a landscape one
+ * 1.33, so the sides are cut before anything else happens -- to 58 per cent of
+ * the width for the first and 34 for the second. Turning the phone fixes it,
+ * and until now that was the only thing that did.
+ */
+export function estimateCaptureAspect(
+  centers: Float32Array | undefined,
+  options: { stride?: number; percentile?: number } = {},
+): number | null {
+  const tall = estimateCaptureTangent(centers, { ...options, axis: 'y' });
+  const wide = estimateCaptureTangent(centers, { ...options, axis: 'x' });
+  if (!tall || !wide) return null;
+  const aspect = wide / tall;
+  return Number.isFinite(aspect) && aspect > 0 ? aspect : null;
 }
 
 export type WindowPlacement = {
@@ -96,7 +127,23 @@ export const TIP_GAIN = 3;
  */
 export const MAX_TIP_DEG = 55;
 
-export const MIN_ZOOM = 1;
+/**
+ * How far the frame may be pulled back out of the window.
+ *
+ * Zoom above 1 crops into the photograph. Below 1 it does the opposite: the
+ * virtual window grows past the physical glass, so more of the frame fits and
+ * the picture is drawn smaller. That stops being a literal window, and not by
+ * a small margin: the picture is built for a larger pane than the one it is
+ * shown on, so everything on it -- including how far it moves when the head
+ * moves -- is scaled down in the same proportion. It is a trade, worth making
+ * when the alternative is losing a third of the picture off the sides.
+ *
+ * It earns its place on the width. The scene is fitted to the frame's HEIGHT,
+ * and a phone held upright is far narrower in proportion than a photograph is,
+ * so the sides are cut before anything else happens: about 58 per cent of the
+ * width survives for a portrait, 34 for a landscape one, 26 for 16:9.
+ */
+export const MIN_ZOOM = 0.3;
 export const MAX_ZOOM = 4;
 
 /**

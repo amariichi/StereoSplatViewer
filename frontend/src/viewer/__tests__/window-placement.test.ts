@@ -4,9 +4,11 @@ import {
   MAX_DEPTH_SCALE,
   MIN_DEPTH_SCALE,
   computeWindowPlacement,
+  estimateCaptureAspect,
   estimateCaptureTangent,
   findFarFieldCut,
   MAX_ZOOM,
+  MIN_ZOOM,
   MIN_EYE_FRACTION,
   lifeSizeDistanceMm,
   apexDistance,
@@ -214,6 +216,49 @@ describe('mapping the head so a comfortable distance is the apex', () => {
   });
 });
 
+describe('reading the photograph\'s shape back off the gaussians', () => {
+  // A frame w wide and h tall, unprojected: the extreme gaussians sit on its
+  // edge, so the ratio of the two tangents is the ratio of its sides.
+  const frame = (halfW: number, halfH: number, depth = 2) => {
+    const out: number[] = [];
+    for (let i = 0; i <= 40; i++) {
+      const f = i / 40;
+      out.push((-halfW + 2 * halfW * f) * depth, halfH * depth, -depth);
+      out.push((-halfW + 2 * halfW * f) * depth, -halfH * depth, -depth);
+      out.push(halfW * depth, (-halfH + 2 * halfH * f) * depth, -depth);
+      out.push(-halfW * depth, (-halfH + 2 * halfH * f) * depth, -depth);
+    }
+    return new Float32Array(out);
+  };
+
+  it('measures the two axes separately', () => {
+    const centers = frame(0.6, 0.4);
+    expect(estimateCaptureTangent(centers, { stride: 1, percentile: 1 })).toBeCloseTo(0.4, 6);
+    expect(estimateCaptureTangent(centers, { stride: 1, percentile: 1, axis: 'x' }))
+      .toBeCloseTo(0.6, 6);
+  });
+
+  it('reports a landscape frame as wider than tall and a portrait as the reverse', () => {
+    expect(estimateCaptureAspect(frame(0.6, 0.4), { stride: 1, percentile: 1 }))
+      .toBeCloseTo(1.5, 6);
+    expect(estimateCaptureAspect(frame(0.3, 0.4), { stride: 1, percentile: 1 }))
+      .toBeCloseTo(0.75, 6);
+  });
+
+  it('says nothing rather than guessing when there is nothing to measure', () => {
+    expect(estimateCaptureAspect(undefined)).toBe(null);
+    expect(estimateCaptureAspect(new Float32Array([]))).toBe(null);
+  });
+
+  it('is what decides how much of the width a screen shows', () => {
+    // An upright phone against an ordinary landscape photograph: without
+    // opening zoomed out, two thirds of the width is off the sides.
+    const phone = 1206 / 2622;
+    const aspect = estimateCaptureAspect(frame(0.667, 0.5), { stride: 1, percentile: 1 })!;
+    expect(Math.min(1, phone / aspect)).toBeCloseTo(0.345, 3);
+  });
+});
+
 describe('trading framing against apparent size, which a small screen forces', () => {
   const screenHalfHeightMm = 67;
 
@@ -246,10 +291,28 @@ describe('trading framing against apparent size, which a small screen forces', (
   });
 
   it('clamps the zoom rather than letting it invert or run away', () => {
-    expect(computeWindowPlacement({ ...options, zoom: 0.1 }).visibleFraction).toBe(1);
+    // Below one the window grows past the frame, which is how a photograph
+    // wider than the screen is ever seen whole -- so more than 1 here is the
+    // point rather than a fault. It still stops, at MIN_ZOOM.
+    expect(computeWindowPlacement({ ...options, zoom: 0.1 }).visibleFraction)
+      .toBeCloseTo(1 / MIN_ZOOM, 12);
+    expect(computeWindowPlacement({ ...options, zoom: 0.6 }).visibleFraction)
+      .toBeCloseTo(1 / 0.6, 12);
+    // Nonsense still falls back to showing exactly the frame.
     expect(computeWindowPlacement({ ...options, zoom: -2 }).visibleFraction).toBe(1);
+    expect(computeWindowPlacement({ ...options, zoom: Number.NaN }).visibleFraction).toBe(1);
     expect(computeWindowPlacement({ ...options, zoom: 1e6 }).visibleFraction)
       .toBeCloseTo(1 / MAX_ZOOM, 12);
+  });
+
+  it('leaves the apex and the scene alone when zooming out, as when zooming in', () => {
+    // The same guarantee the zoom-in test makes: only the window changes, so
+    // the geometry stays exact on both sides of one.
+    for (const zoom of [0.3, 0.6, 1, 2]) {
+      expect(computeWindowPlacement({ ...options, zoom }).translation.z).toBeCloseTo(apex, 12);
+      expect(computeWindowPlacement({ ...options, zoom }).scale)
+        .toBeCloseTo(computeWindowPlacement({ ...options, zoom: 1 }).scale, 12);
+    }
   });
 
   it('makes a larger miniature flatter, and a smaller one deeper', () => {
