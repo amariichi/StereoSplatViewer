@@ -128,3 +128,39 @@ html, body, #root {
 @media (prefers-reduced-motion: reduce) {
   .window-viewer__spinner { animation-duration: 2600ms; }
 }
+
+/* The lens, shown only when the photograph did not record its own. It sits in
+   the same bar as the buttons and is sized for a two or three digit number, so
+   it reads as one control beside them rather than a form dropped into a row of
+   buttons. */
+.window-viewer__lens {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.window-viewer__lens input {
+  width: 5.5em;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(12, 16, 24, 0.85);
+  color: inherit;
+  font: inherit;
+  /* An IME hands back full-width digits, which are wider than the Latin ones
+     the field is sized for; tabular figures keep it from jumping as they are
+     replaced. */
+  font-variant-numeric: tabular-nums;
+}
+
+.window-viewer__lens input::placeholder {
+  color: rgba(255, 255, 255, 0.4);
+}
+
+/* Shown only while a pasted picture is waiting to be told its lens, which is
+   the one moment when the field needs explaining rather than just offering. */
+.window-viewer__lens-note {
+  font-size: 12px;
+  opacity: 0.8;
+  max-width: 22em;
+}

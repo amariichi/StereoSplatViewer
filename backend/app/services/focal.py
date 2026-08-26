@@ -26,6 +26,10 @@ LOGGER = logging.getLogger(__name__)
 # Below this SHARP treats the value as a physical focal length rather than a
 # 35 mm equivalent and multiplies it by 8.4, which is not what a caller giving a
 # 35 mm equivalent means.
+# What SHARP falls back to when the file says nothing. Recorded rather than
+# left blank, so a scene always says what it was built with.
+DEFAULT_ASSUMED_MM = 30.0
+
 MIN_FOCAL_MM = 10.0
 MAX_FOCAL_MM = 800.0
 
@@ -80,3 +84,60 @@ def apply_focal_length(image_path: Path, focal_mm: float | None) -> bool:
     except Exception as exc:  # noqa: BLE001
         LOGGER.warning("Could not set the focal length on %s: %s", image_path, exc)
         return False
+
+
+def effective_focal_mm(
+    image_path: Path,
+    from_exif: float | None,
+    requested: float | None,
+    wrote: bool,
+) -> float:
+    """
+    The focal length SHARP will actually unproject through.
+
+    Not the same as what was asked for. An override that could not be written
+    is not in the file and will not be read; a photograph that says nothing
+    gets the tool's own assumption rather than nothing at all. Recording the
+    request instead would leave a scene labelled with a lens it was not built
+    with, which is the sort of note that is worse than none.
+
+    Rounded, because that is how the tag is stored.
+    """
+
+    if wrote:
+        value = clamp_focal_mm(requested)
+        if value is not None:
+            return float(round(value))
+    if from_exif is not None:
+        return float(round(from_exif))
+    return float(DEFAULT_ASSUMED_MM)
+
+
+def read_focal_mm(image_path: Path) -> float | None:
+    """
+    The 35 mm-equivalent focal length the file already carries, if any.
+
+    This is what decides whether anyone needs to be asked. A photograph that
+    records its lens needs no help and should not be interrupted for one; a
+    photograph that does not is the case the whole control exists for, and
+    SHARP's 30 mm default is a guess that is wrong more often than not for a
+    portrait.
+
+    Anything unreadable is treated as absent, which is the same as what SHARP
+    would conclude.
+    """
+
+    try:
+        import piexif
+
+        exif = piexif.load(str(image_path))
+        value = exif.get("Exif", {}).get(piexif.ExifIFD.FocalLengthIn35mmFilm)
+        if value is None:
+            return None
+        # piexif hands rationals back as a pair; a plain int is also seen.
+        if isinstance(value, tuple) and len(value) == 2 and value[1]:
+            value = value[0] / value[1]
+        value = float(value)
+        return value if value > 0 else None
+    except Exception:  # noqa: BLE001 - no EXIF, broken EXIF and no piexif are all "absent"
+        return None
