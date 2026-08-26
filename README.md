@@ -103,6 +103,12 @@ Press **Start 3D** and hold still while it calibrates. iOS asks for the camera a
 
 A **pinch** sets how much of the frame is on screen. Spreading crops in, which is the only lever a small screen leaves: the whole photograph looks life-sized only from close up -- how close depends on the lens, and the readout names the distance for the scene you are holding -- and cropping brings that out towards arm's length at the cost of the edges. Pinching the other way pulls back to show more, which is how a photograph wider than the screen is seen whole; the page opens that way by itself when the shapes do not match. The status line names the trade as you go, and **Reset view** puts it back.
 
+**Lens** appears when the photograph did not record what took it. `ml-sharp` assumes 30 mm in that case, and that assumption sets the shape of the scene, not just its scale -- on one measured image the subject sat 2.5 metres away at 30 mm and 6.9 at 85, with the depth stretched to match. A portrait built at 30 mm when it was taken at 85 comes out pressed flat.
+
+So a picture pasted here that says nothing about its lens is not built straight away: the field is offered first, and building starts when you answer it. Leave it blank to accept the 30 mm that would have been assumed anyway. Full-width digits are read as ordinary ones, so there is no need to change keyboards for two characters.
+
+The lens cannot be judged before the scene exists, so the field stays afterwards: type a different number and press **Rebuild**. That runs `ml-sharp` again, which takes about as long as the first time. Nothing rebuilds on its own -- only when you press it. A scene whose photograph did record its lens is never asked about, and a 360 scene cannot be rebuilt this way at all, being six reconstructions merged rather than one.
+
 **True window** decides where the picture is drawn from. On, it is drawn from where your eye actually is: shapes hold as you tilt the device, and what the glass shows is cropped as it goes deeper, the way a real window crops it. Off, the whole photograph stays on screen at every depth, and the cost is that shapes stretch towards the edges. On is the default.
 
 **Depth** slides the miniature further behind the glass, in steps. It sets how far back it sits and how widely it swings when you turn it with a finger -- nearer values keep the swing tight. It is not a depth-strength control: moving a whole scene away flattens it rather than deepening it.
@@ -287,6 +293,12 @@ StereoSplatViewer は、外部の `ml-sharp` を使って単一の写真から 3
 **Reverse tracking** は、頭を動かしたとき視点がどちらへ動くかを反転します。前面カメラの向きを逆に報告する端末のためのもので、記憶されます。
 
 **ピンチ**は画面に入るフレームの量を決めます。広げると寄ります — 小さい画面に残された唯一のつまみです。写真全体が実物大に見える距離はかなり近く、レンズによって変わります（いま見ているシーンの値は表示に出ます）。切り取ることでそれを腕の長さに寄せられます。代償は端が失われることです。狭めると引きます。画面より横長の写真を全部見るにはこちらで、形が合わないときはページが自動でその状態から開きます。交換比はステータス行に常時出ます。**Reset view** で戻ります。
+
+**Lens** は、写真がレンズを記録していなかったときだけ出ます。その場合 `ml-sharp` は 30 mm と仮定しますが、これは大きさだけでなく**形**を決めます — 実測した1枚では、被写体が 30 mm で 2.5 m、85 mm で 6.9 m の位置に置かれ、奥行きもそれに応じて伸びました。85 mm で撮ったポートレートを 30 mm で組むと、**平たく潰れます**。
+
+そのため、レンズ情報の無い画像をここに貼っても**すぐには生成しません**。先に入力欄が出て、答えたところで生成が始まります。空欄のままでも構いません（どのみち仮定される 30 mm を選んだことになります）。**全角の数字はそのまま読めます**ので、2文字のために入力モードを切り替える必要はありません。
+
+レンズはシーンを見るまで判断できないので、欄は生成後も残ります。別の数値を入れて **Rebuild** を押せば作り直します。`ml-sharp` を回し直すので、初回と同じくらいの時間がかかります。**押したときだけ**走り、勝手に再生成されることはありません。レンズを記録していた写真では一度も聞きません。360 のシーンは6つの復元を合成したものなので、この方法では作り直せません。
 
 **True window** は、絵をどこから描くかを決めます。オンなら**実際のあなたの目の位置**から描きます。端末を傾けても形が崩れず、ガラスの先は奥へ行くほど切り取られます — 本物の窓がそうであるように。オフなら写真全体がどの奥行きでも画面に収まりますが、代わりに端に近いほど形が伸びます。既定はオンです。
 

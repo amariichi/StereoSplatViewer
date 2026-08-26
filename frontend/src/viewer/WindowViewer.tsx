@@ -53,6 +53,24 @@ const MIRROR_STORAGE_KEY = 'stereosplat-window-mirror-x-v1';
  */
 const EYE_BOUND = 2.5;
 
+/**
+ * Read a focal length someone typed on a phone.
+ *
+ * A Japanese keyboard in its usual state produces full-width digits, so `５０`
+ * arrives where `50` was meant and `Number` makes NaN of it. Translating the
+ * block is a subtraction; the alternative is telling people to switch input
+ * mode to type two digits.
+ *
+ * Returns null for anything that is not a usable 35 mm equivalent. The server
+ * bounds it again -- this is only so the field can say so before asking.
+ */
+export function parseFocalMm(text: string): number | null {
+  const half = text.replace(/[０-９．]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0));
+  const value = Number(half.trim());
+  if (!Number.isFinite(value) || value < 10 || value > 800) return null;
+  return value;
+}
+
 function safeStorage(): Storage | null {
   try {
     return window.localStorage;
@@ -74,6 +92,24 @@ function readMirrorPreference(): boolean {
     // Private browsing can refuse storage; the default still works.
   }
   return true;
+}
+
+/**
+ * What this job's photograph said about its lens.
+ *
+ * Only needed for an address that names a scene: that turns the poll off, and
+ * the poll is otherwise where this is learned. Without it, opening a flat
+ * scene by its job identifier offered no way to fix it.
+ */
+async function lensMissingFor(jobId: string): Promise<boolean> {
+  try {
+    const response = await fetch(`/api/scene/${jobId}/lens`);
+    if (!response.ok) return false;
+    const body = await response.json();
+    return body?.recorded === true && body?.fromExif == null;
+  } catch {
+    return false;
+  }
 }
 
 /** Which scene to show, when the address names one. */
@@ -100,16 +136,29 @@ function sceneUrlFromLocation(): string | null {
  * the small one whenever there is one. `sogUrl` is absent when the compressor
  * could not run, and then this falls back to what it always used.
  */
-async function latestSceneUrl(): Promise<string | null> {
+async function latestScene(): Promise<
+  { url: string; jobId: string; lensMissing: boolean } | null> {
   try {
     const response = await fetch('/api/scene/latest');
     if (!response.ok) return null;
     const body = await response.json();
-    if (typeof body?.sogUrl === 'string') return body.sogUrl;
-    return typeof body?.plyUrl === 'string' ? body.plyUrl : null;
+    const url = typeof body?.sogUrl === 'string' ? body.sogUrl
+      : typeof body?.plyUrl === 'string' ? body.plyUrl : null;
+    if (!url || typeof body?.jobId !== 'string') return null;
+    // `lensRecorded` false means nobody wrote it down -- a scene from before
+    // this was kept -- which is not the same as knowing there was no lens.
+    return {
+      url,
+      jobId: body.jobId,
+      lensMissing: body.lensRecorded === true && body.fromExif == null,
+    };
   } catch {
     return null;
   }
+}
+
+async function latestSceneUrl(): Promise<string | null> {
+  return (await latestScene())?.url ?? null;
 }
 
 export function WindowViewer() {
@@ -160,6 +209,14 @@ export function WindowViewer() {
   // Null when nothing is downloading. A compressed scene is still about
   // eleven megabytes and a mobile connection makes that a long silence.
   const [sceneProgress, setSceneProgress] = useState<number | null>(null);
+  // Null when the photograph recorded its own lens, or when there is no scene
+  // from this session to know about. Set only when it did not, which is the
+  // one case worth interrupting anybody for.
+  const [lensJobId, setLensJobId] = useState<string | null>(null);
+  const [lensText, setLensText] = useState('');
+  // True while a pasted picture is waiting to be told its lens: nothing is
+  // building and there is nothing to look at until it is answered.
+  const [lensPending, setLensPending] = useState(false);
   // Two controls for the projection itself, so the difference can be judged on
   // a device rather than argued about. See HeadPose#trueWindow and #pushBack.
   const [trueWindow, setTrueWindow] = useState(true);
@@ -202,10 +259,16 @@ export function WindowViewer() {
   // Bumped by everything that chooses a scene, so an answer to an older
   // request can tell that it has been overtaken.
   const sceneGenerationRef = useRef(0);
+  const lensJobIdRef = useRef<string | null>(null);
+  const lensTextRef = useRef('');
+  const buildingRef = useRef<string | null>(null);
   const trueWindowRef = useRef(true);
   const pushMmRef = useRef(0);
   useEffect(() => { trueWindowRef.current = trueWindow; }, [trueWindow]);
   useEffect(() => { pushMmRef.current = pushMm; }, [pushMm]);
+  useEffect(() => { lensJobIdRef.current = lensJobId; }, [lensJobId]);
+  useEffect(() => { lensTextRef.current = lensText; }, [lensText]);
+  useEffect(() => { buildingRef.current = building; }, [building]);
 
   const publishPose = useCallback(() => {
     setPose({
@@ -232,17 +295,30 @@ export function WindowViewer() {
   // The poll is one small JSON request; the scene itself is only fetched when
   // the answer is different from what is already on screen.
   useEffect(() => {
-    // An address that names a scene means it: nothing here overrides it.
-    if (sceneUrlFromLocation()) return undefined;
+    // An address that names a scene means it: nothing here overrides it. The
+    // lens still has to be asked after, though, because this is where it would
+    // otherwise have been learned.
+    if (sceneUrlFromLocation()) {
+      const params = new URLSearchParams(window.location.search);
+      const named = params.get('job');
+      if (named) {
+        lensMissingFor(named).then((missing) => setLensJobId(missing ? named : null));
+      }
+      return undefined;
+    }
     let cancelled = false;
     const check = () => {
       // A poll that is still out cannot be allowed to answer for a scene
       // chosen since it left -- pasting one sets the scene directly, and the
       // reply to a request made before that would put the old one back.
       const mine = ++sceneGenerationRef.current;
-      latestSceneUrl().then((url) => {
-        if (cancelled || mine !== sceneGenerationRef.current || !url) return;
-        setSceneUrl((current) => (url === current ? current : url));
+      latestScene().then((scene) => {
+        if (cancelled || mine !== sceneGenerationRef.current || !scene) return;
+        // Offered whenever the scene on the server was made without a lens,
+        // whoever made it -- a photograph pasted here, or one built on the
+        // desktop and found to look flat from the sofa.
+        setLensJobId(scene.lensMissing ? scene.jobId : null);
+        setSceneUrl((current) => (scene.url === current ? current : scene.url));
       });
     };
     check();
@@ -466,10 +542,27 @@ export function WindowViewer() {
     try {
       const response = await fetch('/api/upload', {
         method: 'POST',
-        body: (() => { const form = new FormData(); form.append('file', file); return form; })(),
+        body: (() => {
+          const form = new FormData();
+          form.append('file', file);
+          // Stop before building if the photograph does not say what lens took
+          // it. Guessing means building twice, and building is twenty seconds
+          // and eleven megabytes.
+          form.append('hold_for_lens', 'true');
+          return form;
+        })(),
       });
       if (!response.ok) throw new Error(`the server answered ${response.status}`);
       const job = await response.json();
+      if (job.needsLens) {
+        // Nothing is running. The field below starts it, with whatever is
+        // typed there or with the 30 mm SHARP would have assumed anyway.
+        setBuilding(null);
+        setLensJobId(job.jobId);
+        setLensText('');
+        setLensPending(true);
+        return;
+      }
       setBuilding('Generating the scene');
 
       // ml-sharp takes a few seconds on a graphics card and considerably longer
@@ -491,6 +584,9 @@ export function WindowViewer() {
       // the small one, downloading the scene twice.
       sceneGenerationRef.current += 1;
       setSceneUrl((await latestSceneUrl()) ?? job.plyUrl);
+      // Whether to offer the lens is decided from the scene itself, by the
+      // poll above, so that it does not depend on who made it.
+      setLensText('');
 
       // Somebody who pasted a picture in order to look at it in three
       // dimensions does not also need to say so. This only reaches the camera
@@ -571,6 +667,51 @@ export function WindowViewer() {
     setZoom(clamped);
     publishPose();
   }, [publishPose]);
+
+  /**
+   * Build the scene again through a different lens.
+   *
+   * The lens cannot be judged before the scene exists -- a wrong one shows up
+   * as depth pressed flat or drawn out, and there is no way to see that except
+   * to look. So this exists to look again, and it runs only when a value has
+   * been typed and this is pressed. Nothing re-runs on its own.
+   */
+  const rebuildWithLens = useCallback(async () => {
+    if (buildingRef.current) return;
+    const jobId = lensJobIdRef.current;
+    // Blank is an answer too: it means the 30 mm SHARP would have assumed, and
+    // saying it outright is the same picture as saying nothing.
+    const focal = lensTextRef.current.trim() === '' ? 30 : parseFocalMm(lensTextRef.current);
+    if (!jobId || focal === null) return;
+    setError(null);
+    setLensPending(false);
+    setBuilding(`Building at ${focal.toFixed(0)} mm`);
+    try {
+      const form = new FormData();
+      form.append('focal_length_35mm', String(focal));
+      const response = await fetch(`/api/scene/${jobId}/relens`, { method: 'POST', body: form });
+      if (!response.ok) throw new Error(`the server answered ${response.status}`);
+
+      const deadline = Date.now() + 10 * 60 * 1000;
+      for (;;) {
+        if (Date.now() > deadline) throw new Error('the scene took too long');
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        const status = await (await fetch(`/api/scene/${jobId}/status`)).json();
+        if (status.status === 'done') break;
+        if (status.status === 'error') throw new Error(status.message || 'the backend failed');
+      }
+      // The server stamps a revision into the URL, so a rebuilt scene is a
+      // different address and both the cache and this effect notice. Setting
+      // the same string twice did not: React collapses that to one update, and
+      // the picture stayed on screen while the new one sat on disk.
+      sceneGenerationRef.current += 1;
+      setSceneUrl(await latestSceneUrl());
+    } catch (err) {
+      setError(`Could not rebuild at that lens: ${(err as Error).message}`);
+    } finally {
+      setBuilding(null);
+    }
+  }, []);
 
   const toggleMirror = useCallback(() => {
     setMirrorX((previous) => {
@@ -731,6 +872,37 @@ export function WindowViewer() {
           title="Turn the image on the clipboard into a scene">
           Paste image
         </button>
+        {/* Only when the photograph did not record its own lens. When it did,
+            that value is right and there is nothing to ask. */}
+        {lensJobId && (
+          <span className="window-viewer__lens">
+            {lensPending && (
+              <span className="window-viewer__lens-note">
+                No lens in this picture — 30 mm is assumed. A portrait is 50 to 85.
+              </span>
+            )}
+            <input
+              type="text"
+              inputMode="decimal"
+              value={lensText}
+              placeholder="lens mm"
+              aria-label="Lens, 35 mm equivalent"
+              title="This photograph did not say what lens took it, so 30 mm was assumed. If the depth looks pressed flat, a portrait is usually 50 to 85."
+              onChange={(e) => setLensText(e.target.value)}
+              onKeyDown={(e) => {
+                // The button is disabled while one is building; Enter has to
+                // respect that too, or holding it queues rebuilds.
+                if (e.key === 'Enter' && building === null) void rebuildWithLens();
+              }}
+            />
+            <button type="button"
+              disabled={building !== null
+                || (lensText.trim() !== '' && parseFocalMm(lensText) === null)}
+              onClick={() => void rebuildWithLens()}>
+              {lensPending ? 'Build' : 'Rebuild'}
+            </button>
+          </span>
+        )}
         {(zoom !== 1 || pose?.pan?.x || pose?.pan?.y || pose?.spin || pose?.tip) ? (
           <button type="button" onClick={resetView}>Reset view</button>
         ) : null}

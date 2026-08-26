@@ -211,12 +211,24 @@ async def latest_scene() -> JSONResponse:
         raise HTTPException(status_code=404, detail="no scene published yet")
     # Both are offered and each caller picks. The editor wants the PLY, which
     # is what its exports come from; the phone wants the small one.
+    lens = storage.read_lens(latest["jobId"])
+    # The bytes at these URLs are cached for a year as immutable, which is true
+    # of any one URL and false of a job that can be built again through a
+    # different lens. The revision makes the second build a different URL, so
+    # what is cached stays valid and what is asked for is the new scene.
+    stamp = f"?v={lens['revision']}" if lens.get("revision") else ""
     payload = {
         **latest,
-        "plyUrl": f"/api/scene/{latest['jobId']}/{latest['name']}",
+        "plyUrl": f"/api/scene/{latest['jobId']}/{latest['name']}{stamp}",
     }
     if storage.sog_path(latest["jobId"]).is_file():
-        payload["sogUrl"] = f"/api/scene/{latest['jobId']}/scene.sog"
+        payload["sogUrl"] = f"/api/scene/{latest['jobId']}/scene.sog{stamp}"
+    # So that a viewer which did not make this scene can still tell whether the
+    # lens was known, and offer to replace it when it was not.
+    payload.update(lens)
+    # A scene from before this was recorded has no answer either way, and
+    # "no lens" would be a guess that offers to rebuild everything.
+    payload["lensRecorded"] = lens.get("recorded", False)
     return JSONResponse(payload, headers={"Cache-Control": _NEVER})
 
 
@@ -227,6 +239,7 @@ async def upload_image(
     mlsharp_cli: str | None = None,
     focal_length_35mm: float | None = Form(default=None),
     treat_sky: bool = Form(default=False),
+    hold_for_lens: bool = Form(default=False),
 ) -> JSONResponse:
     try:
         storage.clear_data_root()
@@ -244,8 +257,21 @@ async def upload_image(
     # sets the field of view the scene is unprojected through and therefore both
     # its shape and the distance it can comfortably be looked at from. Writing
     # the value in is the only way to tell the command-line tool.
-    if focal.apply_focal_length(input_path, focal_length_35mm):
+    # Read before writing: this is what the file itself said, and it is what
+    # decides whether the viewer has to ask anybody anything.
+    focal_from_exif = focal.read_focal_mm(input_path)
+    wrote = focal.apply_focal_length(input_path, focal_length_35mm)
+    if wrote:
         LOGGER.info("Set the 35mm-equivalent focal length to %s mm", focal_length_35mm)
+    # What SHARP will actually read, which is not always what was asked for: an
+    # override that could not be written is not in the file, and a photograph
+    # that says nothing gets SHARP's own 30 mm rather than no lens at all.
+    storage.write_lens(
+        job_id,
+        focal_from_exif,
+        focal.effective_focal_mm(input_path, focal_from_exif, focal_length_35mm, wrote),
+        source=input_path.name,
+    )
 
     # A flat blown-out sky gives the depth model nothing to measure, and a
     # quarter of it can end up at the subject's own distance. Treating it fixes
@@ -255,7 +281,17 @@ async def upload_image(
     if treat_sky:
         sky_report["treated"] = sky.treat_sky(input_path)
 
-    background_tasks.add_task(_start_job, job_id, input_path, mlsharp_cli)
+    # Asked for by a caller that would rather supply the lens than guess and
+    # build twice. A photograph that records its own is started straight away;
+    # one that does not is left standing until somebody answers, because the
+    # 30 mm SHARP would otherwise assume is wrong often enough that building on
+    # it means building again -- twenty seconds and eleven megabytes, twice.
+    needs_lens = hold_for_lens and focal_from_exif is None and focal_length_35mm is None
+    if needs_lens:
+        storage.write_status(
+            job_id, {"status": "pending", "message": "waiting for the lens"})
+    else:
+        background_tasks.add_task(_start_job, job_id, input_path, mlsharp_cli)
     input_name = Path(file.filename or "").name
     stem = Path(input_name).stem if input_name else "scene"
     if input_name and mode360.is_360_filename(input_name):
@@ -274,8 +310,85 @@ async def upload_image(
             "statusUrl": status_url,
             "logsUrl": logs_url,
             "metaUrl": meta_url,
+            # Null means the photograph did not say, and SHARP fell back to its
+            # 30 mm default -- a guess, and the reason the viewer offers to
+            # replace it.
+            "focalFromExif": focal_from_exif,
+            "focalUsed": focal.clamp_focal_mm(focal_length_35mm) or focal_from_exif,
+            # True means nothing is running yet and this job is waiting to be
+            # told which lens to use. Post one to `relens` to start it.
+            "needsLens": needs_lens,
         }
     )
+
+
+@app.post("/api/scene/{job_id}/relens")
+def relens(job_id: str, background_tasks: BackgroundTasks,
+           focal_length_35mm: float = Form(...)) -> JSONResponse:
+    """
+    Build this job's scene through a given lens.
+
+    Used two ways, and they are the same operation. A job held at upload because
+    its photograph did not record a lens is started by this. A job already built
+    is built again by it.
+
+    Only worth having because the lens cannot be judged before the scene
+    exists. A photograph that does not record its own is unprojected through
+    SHARP's 30 mm default, and if that is wrong the depth is wrong with it --
+    visibly, as a scene pressed flat or drawn out. There is no way to know
+    except to look, so there has to be a way to look again.
+
+    The source image is still in the job directory, so this reuses it rather
+    than asking for the picture a second time. The job is replaced in place:
+    every upload clears the data root, so one scene at a time is the shape the
+    rest of this is built around, and the previous lens is not kept. Finding
+    the right one means trying it, not collecting them.
+    """
+
+    directory = storage.job_dir(job_id)
+    if not directory.exists():
+        raise HTTPException(status_code=404, detail="no such scene")
+
+    # One build at a time. Two of these at once would rewrite the same source's
+    # EXIF, the same logs and the same outputs, and whichever finished last
+    # would not necessarily be the lens recorded last.
+    status = storage.read_status(job_id) or {}
+    if status.get("status") == "running":
+        raise HTTPException(status_code=409, detail="this scene is already being built")
+
+    lens = storage.read_lens(job_id)
+    recorded = lens.get("source")
+    source = directory / Path(str(recorded)).name if recorded else None
+    if source is None or not source.is_file():
+        # Guessing is what made this dangerous: a finished 360 job is full of
+        # generated cube faces, and the first image by name is one of them.
+        raise HTTPException(status_code=409, detail="the source image is no longer here")
+
+    # A panorama is six reconstructions merged, not one, and rebuilding it as a
+    # single image would quietly replace it with a flat piece of itself.
+    if mode360.is_360_filename(source.name):
+        raise HTTPException(
+            status_code=409, detail="a 360 scene cannot be rebuilt through a different lens")
+
+    value = focal.clamp_focal_mm(focal_length_35mm)
+    if value is None:
+        raise HTTPException(status_code=400, detail="that is not a usable focal length")
+    if not focal.apply_focal_length(source, value):
+        raise HTTPException(status_code=500, detail="could not set the focal length")
+
+    # Marked running before anything else, so `latest` stops publishing the old
+    # scene the moment the new one is asked for rather than serving it until
+    # the replacement lands.
+    # The original answer is preserved: it is what decides whether the offer is
+    # made at all, and it must not be overwritten by an answer given since.
+    storage.write_lens(job_id, lens.get("fromExif"), value, source=source.name)
+    storage.write_status(job_id, {"status": "running", "message": f"rebuilding at {value:.0f} mm"})
+    background_tasks.add_task(_start_job, job_id, source, None)
+    return JSONResponse({
+        "jobId": job_id,
+        "focalUsed": value,
+        "statusUrl": f"/api/scene/{job_id}/status",
+    })
 
 
 @app.post("/api/cleanup")
@@ -328,6 +441,26 @@ def get_sog(job_id: str) -> FileResponse:
         media_type="application/octet-stream",
         headers={"Cache-Control": _FOREVER},
     )
+
+
+@app.get("/api/scene/{job_id}/lens")
+def get_lens(job_id: str) -> JSONResponse:
+    """
+    What this scene's photograph said about its lens, and what was used.
+
+    `latest` carries the same two numbers, but a viewer opened on an address
+    that names a scene never asks `latest` -- that is the whole point of naming
+    one -- and would otherwise never learn that the lens was a guess.
+
+    `known` is the question actually being asked: was there a value in the file,
+    or did SHARP fall back to 30 mm. It is reported separately from `fromExif`
+    because a scene made before any of this was recorded has neither, and
+    guessing "no lens" for those would offer to rebuild every scene ever made.
+    """
+
+    if not storage.job_dir(job_id).exists():
+        raise HTTPException(status_code=404, detail="no such scene")
+    return JSONResponse(storage.read_lens(job_id), headers={"Cache-Control": _NEVER})
 
 
 @app.get("/api/scene/{job_id}/logs")

@@ -164,6 +164,80 @@ def latest_job() -> dict[str, str] | None:
     return {"jobId": newest.name, "name": scene.name}
 
 
+def lens_path(job_id: str) -> Path:
+    return job_dir(job_id) / "lens.json"
+
+
+def write_lens(
+    job_id: str,
+    from_exif: float | None,
+    used: float | None,
+    source: str | None = None,
+) -> None:
+    """
+    Record what the photograph said about its lens, and what was used.
+
+    It has to be written down because it cannot be read back afterwards: giving
+    a focal length writes it into the file's own EXIF, so a moment later the
+    source claims to have carried one all along. Whether it originally did is
+    the thing that decides if anyone should be offered the chance to change it.
+    """
+
+    try:
+        current = read_lens(job_id)
+        # Which file this job was made from. Recorded rather than looked for:
+        # a 360 job fills its directory with generated cube faces, and picking
+        # the first image by name found one of those instead of the panorama
+        # the person actually uploaded.
+        keep_source = source or current.get("source")
+        # Bumped whenever the scene is built, so the URL it is served at
+        # changes with it. The bytes are cached for a year as immutable, which
+        # is true of any one URL and false of a job that can be built again.
+        revision = int(current.get("revision") or 0) + 1
+        lens_path(job_id).write_text(
+            json.dumps({
+                "fromExif": from_exif,
+                "used": used,
+                "source": keep_source,
+                "revision": revision,
+            }),
+            encoding="utf-8",
+        )
+    except OSError:
+        # A scene without this is a scene nobody is offered the lens for, which
+        # is the behaviour there was before it existed.
+        pass
+
+
+def read_lens(job_id: str) -> dict[str, object]:
+    """
+    What was recorded about this job's lens, and whether anything was.
+
+    `recorded` is the part that matters. A scene made before any of this
+    existed has no file, and one whose file was truncated or corrupted has
+    nothing usable in it; both are "nobody knows", which is not the same as
+    "the photograph had no lens". Treating the two alike would offer to rebuild
+    every scene ever made through a lens nobody asked about.
+    """
+
+    blank: dict[str, object] = {
+        "fromExif": None, "used": None, "source": None, "revision": 0, "recorded": False,
+    }
+    try:
+        data = json.loads(lens_path(job_id).read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            return blank
+    except (OSError, ValueError):
+        return blank
+    return {
+        "fromExif": data.get("fromExif"),
+        "used": data.get("used"),
+        "source": data.get("source"),
+        "revision": data.get("revision") or 0,
+        "recorded": True,
+    }
+
+
 def published_ply(job_id: str) -> Path | None:
     """
     The PLY a viewer will be given for this job, or None while it has none.

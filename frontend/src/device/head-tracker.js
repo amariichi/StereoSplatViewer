@@ -233,8 +233,29 @@ export function mapMetricPoseToEyePose(metric, calibration, {
     minX,
     maxX,
   );
+  // Negated, which is what makes tipping the device change the view the way
+  // round a person expects. Tipping moves the head up or down in the screen's
+  // own frame, and that is what skews the view volume -- far more than the
+  // levelling does, which is why reversing the levelling instead only
+  // cancelled part of this and made the picture stop responding at all.
+  //
+  // Note that this is the opposite of what the comment above
+  // extractMetricHeadTranslation claims about MediaPipe's axes, and the
+  // opposite of what the landmark fallback below does. Neither disagreement is
+  // explained. What can be said is that the claim there was never checked, that
+  // MediaPipe is loaded at runtime and ships no documentation here to check it
+  // against, and that the sign a viewer actually sees is the product of this
+  // one, the frustum's, and the screen's -- so no single link in that chain
+  // settles it. It was settled by looking at a phone, twice.
+  //
+  // The fallback runs only for the frame or two before MediaPipe returns its
+  // matrix, so the disagreement is not visible in use. It is left alone rather
+  // than flipped to match, because nobody has reported it wrong.
+  //
+  // The sideways axis has the same question and answers it with a button,
+  // "Reverse tracking", because there it does depend on the device.
   const y = clampValue(
-    (metric.yMm - centerY) / worldUnitMm,
+    -(metric.yMm - centerY) / worldUnitMm,
     minY,
     maxY,
   );
