@@ -13,7 +13,10 @@
 // the same amount. One number therefore corrects it at every distance, and the
 // honest way to obtain that number is to ask.
 
-export const HEAD_DISTANCE_SCALE_STORAGE_KEY = 'stereosplat-head-distance-scale-v1';
+// v2 starts with the cyclopean eye rather than the canonical face origin.
+// A scale measured against the old point carries a different additive depth
+// offset, so it must not silently survive that geometry change.
+export const HEAD_DISTANCE_SCALE_STORAGE_KEY = 'stereosplat-head-distance-scale-v2';
 
 // A tracker that disagreed with reality by more than this is not miscalibrated,
 // it is broken, and silently scaling by such a factor would hide that.

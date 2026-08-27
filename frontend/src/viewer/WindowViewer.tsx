@@ -24,10 +24,19 @@ import {
   VIEWING_DISTANCE_STORAGE_KEY,
   computeViewingGeometry,
   loadStoredNumber,
+  mmPerCssPxFromPanelLongSide,
+  preservePhysicalPoint,
   resolveScreenMetrics,
+  saveStoredNumber,
 } from '../device/device-metrics.js';
-import { createTiltTracker } from '../device/device-tilt.js';
-import { computeLevelling, toQuaternion, upInDeviceFrame, type Vec3 } from '../device/levelling';
+import { createTiltTracker, wrapAngle } from '../device/device-tilt.js';
+import {
+  TRUE_WINDOW_LEVELLING_GAIN,
+  computeLevelling,
+  toQuaternion,
+  upInDeviceFrame,
+  type Vec3,
+} from '../device/levelling';
 import { imageFromPasteEvent, readImageFromClipboard } from '../device/clipboard-image';
 import { HeadTracker } from '../device/head-tracker.js';
 import {
@@ -82,6 +91,25 @@ function safeStorage(): Storage | null {
 }
 
 type Status = { code: string; message: string };
+type CaptureProjection = { captureTangent: number; captureAspect: number };
+type ViewportSize = { width: number; height: number; devicePixelRatio: number };
+
+function currentViewportSize(): ViewportSize {
+  return {
+    width: Math.max(1, window.innerWidth),
+    height: Math.max(1, window.innerHeight),
+    devicePixelRatio: window.devicePixelRatio || 1,
+  };
+}
+
+export function captureProjectionFrom(value: unknown): CaptureProjection | null {
+  const candidate = value as Partial<CaptureProjection> | null;
+  const captureTangent = Number(candidate?.captureTangent);
+  const captureAspect = Number(candidate?.captureAspect);
+  if (!(captureTangent > 0) || !Number.isFinite(captureTangent)
+      || !(captureAspect > 0) || !Number.isFinite(captureAspect)) return null;
+  return { captureTangent, captureAspect };
+}
 
 function readMirrorPreference(): boolean {
   try {
@@ -112,6 +140,16 @@ async function lensMissingFor(jobId: string): Promise<boolean> {
   }
 }
 
+async function captureProjectionFor(jobId: string): Promise<CaptureProjection | null> {
+  try {
+    const response = await fetch(`/api/scene/${jobId}/projection`);
+    if (!response.ok) return null;
+    return captureProjectionFrom(await response.json());
+  } catch {
+    return null;
+  }
+}
+
 /** Which scene to show, when the address names one. */
 function sceneUrlFromLocation(): string | null {
   const params = new URLSearchParams(window.location.search);
@@ -137,7 +175,12 @@ function sceneUrlFromLocation(): string | null {
  * could not run, and then this falls back to what it always used.
  */
 async function latestScene(): Promise<
-  { url: string; jobId: string; lensMissing: boolean } | null> {
+  {
+    url: string;
+    jobId: string;
+    lensMissing: boolean;
+    projection: CaptureProjection | null;
+  } | null> {
   try {
     const response = await fetch('/api/scene/latest');
     if (!response.ok) return null;
@@ -151,23 +194,31 @@ async function latestScene(): Promise<
       url,
       jobId: body.jobId,
       lensMissing: body.lensRecorded === true && body.fromExif == null,
+      projection: captureProjectionFrom(body.projection),
     };
   } catch {
     return null;
   }
 }
 
-async function latestSceneUrl(): Promise<string | null> {
-  return (await latestScene())?.url ?? null;
-}
-
 export function WindowViewer() {
   const viewerRef = useRef<ViewerHandle>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const trackerRef = useRef<InstanceType<typeof HeadTracker> | null>(null);
   const tiltRef = useRef<ReturnType<typeof createTiltTracker> | null>(null);
 
   const [sceneUrl, setSceneUrl] = useState<string | null>(() => sceneUrlFromLocation());
+  const [captureProjection, setCaptureProjection] = useState<CaptureProjection | null>(null);
+  const [viewport, setViewport] = useState<ViewportSize>(currentViewportSize);
+  const [measuredMmPerCssPx, setMeasuredMmPerCssPx] = useState<number | null>(
+    () => loadStoredNumber(safeStorage(), DEVICE_SIZE_STORAGE_KEY),
+  );
+  const [panelLongSideText, setPanelLongSideText] = useState(() => {
+    const stored = loadStoredNumber(safeStorage(), DEVICE_SIZE_STORAGE_KEY);
+    const panelCssLongSide = Math.max(window.screen?.width ?? 0, window.screen?.height ?? 0);
+    return stored && panelCssLongSide ? (stored * panelCssLongSide).toFixed(1) : '';
+  });
   const [status, setStatus] = useState<Status>({ code: 'idle', message: 'Ready.' });
   const [tracking, setTracking] = useState(false);
   const [levelled, setLevelled] = useState(false);
@@ -175,31 +226,68 @@ export function WindowViewer() {
   const [error, setError] = useState<string | null>(null);
   const [pose, setPose] = useState<HeadPose | null>(null);
 
-  // The screen's real size decides the whole viewing geometry, so it is
-  // resolved once from a table of known devices, or from a value the viewer
-  // measured themselves, which always wins.
+  // The screen's real size decides the whole viewing geometry. The physical
+  // panel scale is stable, but the visible canvas height changes on rotation
+  // and when mobile browser chrome expands or collapses.
   const geometry = useMemo(() => {
     const storage = safeStorage();
     const metrics = resolveScreenMetrics({
       screenWidth: window.screen?.width,
       screenHeight: window.screen?.height,
-      devicePixelRatio: window.devicePixelRatio,
-      measuredMmPerCssPx: loadStoredNumber(storage, DEVICE_SIZE_STORAGE_KEY),
+      devicePixelRatio: viewport.devicePixelRatio,
+      measuredMmPerCssPx,
     });
     const viewing = computeViewingGeometry({
-      canvasCssHeight: window.innerHeight,
+      canvasCssHeight: viewport.height,
       mmPerCssPx: metrics.mmPerCssPx,
       viewingDistanceMm: loadStoredNumber(storage, VIEWING_DISTANCE_STORAGE_KEY)
         ?? metrics.defaultViewingDistanceMm,
     });
     return { metrics, viewing };
+  }, [measuredMmPerCssPx, viewport.devicePixelRatio, viewport.height]);
+
+  useEffect(() => {
+    const update = () => {
+      const rect = stageRef.current?.getBoundingClientRect();
+      const fallback = currentViewportSize();
+      const next = {
+        width: Math.max(1, rect?.width || fallback.width),
+        height: Math.max(1, rect?.height || fallback.height),
+        devicePixelRatio: fallback.devicePixelRatio,
+      };
+      setViewport((previous) => (
+        previous.width === next.width
+          && previous.height === next.height
+          && previous.devicePixelRatio === next.devicePixelRatio
+          ? previous : next
+      ));
+    };
+    window.addEventListener('resize', update);
+    window.visualViewport?.addEventListener('resize', update);
+    const observer = typeof ResizeObserver === 'undefined' || !stageRef.current
+      ? null : new ResizeObserver(update);
+    if (stageRef.current) observer?.observe(stageRef.current);
+    update();
+    return () => {
+      window.removeEventListener('resize', update);
+      window.visualViewport?.removeEventListener('resize', update);
+      observer?.disconnect();
+    };
   }, []);
+
+  const viewingRef = useRef(geometry.viewing);
+  viewingRef.current = geometry.viewing;
 
   const levellingRef = useRef<{ x: number; y: number; z: number; w: number } | null>(null);
   // Where up was when levelling began. The correction is measured from there,
   // not from vertical: a tablet is read tipped well back, and measuring from
   // vertical pinned the correction at its cap before anyone had moved.
   const levelReferenceRef = useRef<Vec3 | null>(null);
+  // DeviceOrientation supplies the one axis gravity cannot: a turn about
+  // world-up. Only the wrapped delta from the Hold-level/Recenter posture is
+  // published, never an absolute compass bearing.
+  const headingReferenceRef = useRef<number | null>(null);
+  const deviceYawRef = useRef(0);
   const eyeRef = useRef({ x: 0, y: 0, z: geometry.viewing.baselineEyeZ });
   const zoomRef = useRef(1);
   const panRef = useRef({ x: 0, y: 0 });
@@ -264,6 +352,8 @@ export function WindowViewer() {
   const buildingRef = useRef<string | null>(null);
   const trueWindowRef = useRef(true);
   const pushMmRef = useRef(0);
+  const worldUnitMmRef = useRef(geometry.viewing.worldUnitMm);
+  const portraitRef = useRef(viewport.height >= viewport.width);
   useEffect(() => { trueWindowRef.current = trueWindow; }, [trueWindow]);
   useEffect(() => { pushMmRef.current = pushMm; }, [pushMm]);
   useEffect(() => { lensJobIdRef.current = lensJobId; }, [lensJobId]);
@@ -271,23 +361,55 @@ export function WindowViewer() {
   useEffect(() => { buildingRef.current = building; }, [building]);
 
   const publishPose = useCallback(() => {
+    const viewing = viewingRef.current;
     setPose({
       eye: { ...eyeRef.current },
       // How far the eye is from the glass, measured rather than assumed.
-      screenDistance: geometry.viewing.baselineEyeZ,
+      screenDistance: viewing.baselineEyeZ,
       levelling: levellingRef.current,
+      deviceYaw: deviceYawRef.current,
       zoom: zoomRef.current,
       pan: { ...panRef.current },
       spin: spinRef.current,
       tip: tipRef.current,
       trueWindow: trueWindowRef.current,
-      pushBack: pushMmRef.current / geometry.viewing.worldUnitMm,
+      pushBack: pushMmRef.current / viewing.worldUnitMm,
     });
-  }, [geometry.viewing.baselineEyeZ, geometry.viewing.worldUnitMm]);
+  }, []);
 
   useEffect(() => {
+    const previousUnitMm = worldUnitMmRef.current;
+    const nextUnitMm = geometry.viewing.worldUnitMm;
+    if (Math.abs(previousUnitMm - nextUnitMm) > 1e-9) {
+      // Preserve the same physical millimetre eye point while changing the
+      // number of millimetres represented by one world unit.
+      eyeRef.current = preservePhysicalPoint(eyeRef.current, previousUnitMm, nextUnitMm);
+      worldUnitMmRef.current = nextUnitMm;
+    }
+    trackerRef.current?.setViewingGeometry?.({
+      worldUnitMm: nextUnitMm,
+      baselineEyeZ: geometry.viewing.baselineEyeZ,
+    });
+    const portrait = viewport.height >= viewport.width;
+    if (portrait !== portraitRef.current) {
+      // Camera axes and the camera's offset from the canvas centre rotate with
+      // the device. The old lateral calibration cannot be transformed from
+      // viewport dimensions alone, so take a fresh one and hold a centred view
+      // during its five stable samples.
+      trackerRef.current?.recenter();
+      eyeRef.current = { ...eyeRef.current, x: 0, y: 0 };
+      portraitRef.current = portrait;
+    }
     publishPose();
-  }, [publishPose, trueWindow, pushMm]);
+  }, [
+    geometry.viewing.baselineEyeZ,
+    geometry.viewing.worldUnitMm,
+    publishPose,
+    pushMm,
+    trueWindow,
+    viewport.height,
+    viewport.width,
+  ]);
 
   // Nothing in the address: ask the editor what it is holding, and keep
   // asking. A scene made on the desktop lands under a new job id, so the URL
@@ -303,6 +425,7 @@ export function WindowViewer() {
       const named = params.get('job');
       if (named) {
         lensMissingFor(named).then((missing) => setLensJobId(missing ? named : null));
+        captureProjectionFor(named).then(setCaptureProjection);
       }
       return undefined;
     }
@@ -318,6 +441,7 @@ export function WindowViewer() {
         // whoever made it -- a photograph pasted here, or one built on the
         // desktop and found to look flat from the sofa.
         setLensJobId(scene.lensMissing ? scene.jobId : null);
+        setCaptureProjection(scene.projection);
         setSceneUrl((current) => (scene.url === current ? current : scene.url));
       });
     };
@@ -340,10 +464,11 @@ export function WindowViewer() {
     setError(null);
     const video = videoRef.current;
     if (!video) return;
+    const viewing = viewingRef.current;
     const tracker = new HeadTracker({
       video,
-      baselineEyeZ: geometry.viewing.baselineEyeZ,
-      worldUnitMm: geometry.viewing.worldUnitMm,
+      baselineEyeZ: viewing.baselineEyeZ,
+      worldUnitMm: viewing.worldUnitMm,
       mirrorX,
       onStatus: (next: { code: string; message: string }) => setStatus(next),
       onPose: (next: { x: number; y: number; z: number }) => {
@@ -366,8 +491,9 @@ export function WindowViewer() {
         const bound = (v: number) => Math.min(Math.max(v * scale, -EYE_BOUND), EYE_BOUND);
         const corrected = next.z * scale;
         eyeRef.current = { x: bound(next.x), y: bound(next.y), z: corrected };
-        rawHeadMmRef.current = next.z * geometry.viewing.worldUnitMm;
-        setHeadMm(corrected * geometry.viewing.worldUnitMm);
+        const currentWorldUnitMm = viewingRef.current.worldUnitMm;
+        rawHeadMmRef.current = next.z * currentWorldUnitMm;
+        setHeadMm(corrected * currentWorldUnitMm);
         publishPose();
       },
     });
@@ -396,31 +522,43 @@ export function WindowViewer() {
       setError(`Could not start the camera: ${(err as Error).message}`);
       setTracking(false);
     }
-  }, [geometry.viewing.baselineEyeZ, geometry.viewing.worldUnitMm, mirrorX, publishPose]);
+  }, [mirrorX, publishPose]);
 
   startTrackingRef.current = startTracking;
 
 
   const startLevelling = useCallback(async () => {
     setError(null);
+    headingReferenceRef.current = null;
+    deviceYawRef.current = 0;
     const tilt = createTiltTracker({
-      onRoll: () => {
-        const reading = tiltRef.current?.getReading();
+      onRoll: (_roll: number, smoothedReading) => {
+        // Use the filtered three-axis gravity vector supplied with this event.
+        // The roll-only filter was already present, but reading getReading()
+        // here bypassed it and fed raw accelerometer tremor into both axes.
+        const reading = smoothedReading ?? tiltRef.current?.getSmoothedReading();
         if (!reading) return;
         if (!levelReferenceRef.current) {
           levelReferenceRef.current = upInDeviceFrame(reading);
         }
-        // Two axes from one gravity vector, rather than the roll alone. Tipping
-        // the screen up towards the ceiling was the movement that swung the
-        // scene about worst, and a roll-only correction does nothing about it.
-        // The axis-angle form also has no cliff near horizontal: the turn
-        // needed there is a pure tip, which is perfectly well defined even
-        // though a roll angle is not.
-        // Two turns with opposite signs: a roll is always turned back towards
-        // level, while tipping the device up stands the model up. One axis-angle
-        // could not express that, and a single flip control could not either.
-        const levelling = computeLevelling(reading, { reference: levelReferenceRef.current });
+        // Photo mode uses only this attitude's half-strength roll; pitch stays
+        // entirely in its raw tracked eye. True Window uses full pitch/roll
+        // within the finite-scene cap and fuses the eye into this same
+        // Hold-level reference. SplatViewer resolves the per-axis scene signs.
+        const levelling = computeLevelling(reading, {
+          reference: levelReferenceRef.current,
+          gain: trueWindowRef.current ? TRUE_WINDOW_LEVELLING_GAIN : undefined,
+        });
         levellingRef.current = levelling ? toQuaternion(levelling) : null;
+        publishPose();
+      },
+      onHeading: (heading: number) => {
+        if (headingReferenceRef.current === null) {
+          headingReferenceRef.current = heading;
+          deviceYawRef.current = 0;
+        } else {
+          deviceYawRef.current = wrapAngle(heading - headingReferenceRef.current);
+        }
         publishPose();
       },
     });
@@ -441,6 +579,8 @@ export function WindowViewer() {
     tiltRef.current = null;
     levellingRef.current = null;
     levelReferenceRef.current = null;
+    headingReferenceRef.current = null;
+    deviceYawRef.current = 0;
     setLevelled(false);
     publishPose();
   }, [publishPose]);
@@ -451,12 +591,15 @@ export function WindowViewer() {
     tiltRef.current?.stop();
     tiltRef.current = null;
     levellingRef.current = null;
-    eyeRef.current = { x: 0, y: 0, z: geometry.viewing.baselineEyeZ };
+    levelReferenceRef.current = null;
+    headingReferenceRef.current = null;
+    deviceYawRef.current = 0;
+    eyeRef.current = { x: 0, y: 0, z: viewingRef.current.baselineEyeZ };
     publishPose();
     setTracking(false);
     setLevelled(false);
     setStatus({ code: 'idle', message: 'Stopped.' });
-  }, [geometry.viewing.baselineEyeZ, publishPose]);
+  }, [publishPose]);
 
   useEffect(() => () => {
     trackerRef.current?.stop();
@@ -467,11 +610,8 @@ export function WindowViewer() {
     pinch?: number; panX?: number; panY?: number; twistDeg?: number; tipDeg?: number;
   }) => {
     if (gesture.pinch) {
-      // Spreading crops into the frame, which is what pinching means and is
-      // also the only lever a small screen leaves. The whole photograph is
-      // life-sized about 12 cm away, which is no way to hold a phone; cropping
-      // brings that out to arm's length at the cost of the edges of the frame.
-      // The apex does not move, so the geometry stays exact throughout.
+      // In True Window this is a physical uniform model scale; the screen
+      // aperture stays fixed. Photo mode retains its older crop semantics.
       zoomRef.current = Math.min(Math.max(zoomRef.current * gesture.pinch, MIN_ZOOM), MAX_ZOOM);
       setZoom(zoomRef.current);
     }
@@ -505,6 +645,49 @@ export function WindowViewer() {
     tipRef.current = 0;
     publishPose();
   }, [publishPose]);
+
+  const toggleTrueWindow = useCallback(() => {
+    const next = !trueWindowRef.current;
+    trueWindowRef.current = next;
+    setTrueWindow(next);
+    // The same gesture has deliberately different meanings in the two modes,
+    // so never carry a crop factor into the physical model scale or vice versa.
+    zoomRef.current = 1;
+    setZoom(1);
+    publishPose();
+  }, [publishPose]);
+
+  const savePanelSize = useCallback(() => {
+    const half = panelLongSideText.replace(
+      /[０-９．]/g,
+      (character) => String.fromCharCode(character.charCodeAt(0) - 0xFEE0),
+    );
+    const panelLongSideMm = Number(half.trim());
+    try {
+      const mmPerCssPx = mmPerCssPxFromPanelLongSide({
+        panelLongSideMm,
+        screenWidth: window.screen?.width,
+        screenHeight: window.screen?.height,
+      });
+      // Phones and small tablets only. This catches centimetres entered as mm
+      // and accidental zeroes without pretending to identify the device.
+      if (panelLongSideMm < 80 || panelLongSideMm > 400) {
+        throw new Error('Panel long side must be between 80 and 400 mm.');
+      }
+      saveStoredNumber(safeStorage(), DEVICE_SIZE_STORAGE_KEY, mmPerCssPx);
+      setMeasuredMmPerCssPx(mmPerCssPx);
+      setError(null);
+    } catch (calibrationError) {
+      setError(`Could not use that screen size: ${(calibrationError as Error).message}`);
+    }
+  }, [panelLongSideText]);
+
+  const clearPanelSize = useCallback(() => {
+    saveStoredNumber(safeStorage(), DEVICE_SIZE_STORAGE_KEY, null);
+    setMeasuredMmPerCssPx(null);
+    setPanelLongSideText('');
+    setError(null);
+  }, []);
 
   /**
    * Tell the tracker how far away you actually are.
@@ -583,7 +766,9 @@ export function WindowViewer() {
       // this the page loads the large one and the poll then replaces it with
       // the small one, downloading the scene twice.
       sceneGenerationRef.current += 1;
-      setSceneUrl((await latestSceneUrl()) ?? job.plyUrl);
+      const published = await latestScene();
+      setCaptureProjection(published?.projection ?? null);
+      setSceneUrl(published?.url ?? job.plyUrl);
       // Whether to offer the lens is decided from the scene itself, by the
       // poll above, so that it does not depend on who made it.
       setLensText('');
@@ -659,14 +844,22 @@ export function WindowViewer() {
    */
   const fitZoomToAspect = useCallback((aspect: number | null) => {
     if (!aspect || !Number.isFinite(aspect)) return;
-    const canvasAspect = window.innerWidth / Math.max(1, window.innerHeight);
+    if (trueWindowRef.current) {
+      if (zoomRef.current !== 1) {
+        zoomRef.current = 1;
+        setZoom(1);
+        publishPose();
+      }
+      return;
+    }
+    const canvasAspect = viewport.width / Math.max(1, viewport.height);
     const fitted = Math.min(1, canvasAspect / aspect);
     const clamped = Math.min(Math.max(fitted, MIN_ZOOM), MAX_ZOOM);
     if (Math.abs(clamped - zoomRef.current) < 1e-3) return;
     zoomRef.current = clamped;
     setZoom(clamped);
     publishPose();
-  }, [publishPose]);
+  }, [publishPose, viewport.height, viewport.width]);
 
   /**
    * Build the scene again through a different lens.
@@ -705,7 +898,9 @@ export function WindowViewer() {
       // the same string twice did not: React collapses that to one update, and
       // the picture stayed on screen while the new one sat on disk.
       sceneGenerationRef.current += 1;
-      setSceneUrl(await latestSceneUrl());
+      const published = await latestScene();
+      setCaptureProjection(published?.projection ?? null);
+      setSceneUrl(published?.url ?? null);
     } catch (err) {
       setError(`Could not rebuild at that lens: ${(err as Error).message}`);
     } finally {
@@ -743,7 +938,8 @@ export function WindowViewer() {
         resetView();
       }}
     >
-      <div className={`window-viewer__stage${building ? ' window-viewer__stage--hidden' : ''}`}>
+      <div ref={stageRef}
+        className={`window-viewer__stage${building ? ' window-viewer__stage--hidden' : ''}`}>
         {sceneUrl ? (
           <SplatViewer
             ref={viewerRef}
@@ -757,6 +953,8 @@ export function WindowViewer() {
             clampPx={0}
             swapLR={false}
             headPose={pose}
+            captureTangentHint={captureProjection?.captureTangent}
+            captureAspectHint={captureProjection?.captureAspect}
             onGesture={handleGesture}
             onPlacement={setPlacement}
             onSceneProgress={setSceneProgress}
@@ -779,7 +977,7 @@ export function WindowViewer() {
         {showDetail && (
           '\n\n' + [
             `screen  ${geometry.metrics.source} · ${geometry.metrics.mmPerCssPx.toFixed(4)} mm per css px`,
-            `canvas  ${window.innerWidth} x ${window.innerHeight} css · dpr ${window.devicePixelRatio}`,
+            `canvas  ${viewport.width} x ${viewport.height} css · dpr ${viewport.devicePixelRatio}`,
             `panel   ${window.screen?.width} x ${window.screen?.height} css`,
             `world   1 unit = ${geometry.viewing.worldUnitMm.toFixed(2)} mm`,
             `head    raw ${rawHeadMmRef.current?.toFixed(0) ?? '-'} mm`
@@ -835,17 +1033,21 @@ export function WindowViewer() {
               // Wherever the device is being held now becomes the posture the
               // scene is held level against.
               levelReferenceRef.current = null;
+              levellingRef.current = null;
+              headingReferenceRef.current = null;
+              deviceYawRef.current = 0;
+              publishPose();
             }}>Recenter</button>
             <button type="button" onClick={stopEverything}>Stop</button>
           </>
         )}
         <button type="button" className={levelled ? 'on' : ''}
-          title="Hold the scene still in the room, part-way, while the device turns around it"
+          title="Filter sensor jitter and hold the model in the room. True Window uses pitch/roll and relative phone yaw; Recenter captures a fresh reference."
           onClick={levelled ? stopLevelling : startLevelling}>
           Hold level {levelled ? 'on' : 'off'}
         </button>
         <button type="button" className={mirrorX ? 'on' : ''} onClick={toggleMirror}
-          title="Reverse which way the view moves when you move your head">
+          title="Correct the front-camera horizontal axis. Leave this on when real head motion looks correct; phone rotation is handled separately.">
           Reverse tracking {mirrorX ? 'on' : 'off'}
         </button>
         {tracking && (
@@ -855,9 +1057,27 @@ export function WindowViewer() {
             I am at {geometry.viewing.viewingDistanceMm.toFixed(0)} mm
           </button>
         )}
+        {showDetail && (
+          <span className="window-viewer__calibration">
+            <input
+              type="text"
+              inputMode="decimal"
+              value={panelLongSideText}
+              placeholder="panel long side mm"
+              aria-label="Physical panel long side in millimetres"
+              title="Measure the lit panel's longer side in millimetres. This calibrates the physical window scale on an unknown device."
+              onChange={(event) => setPanelLongSideText(event.target.value)}
+              onKeyDown={(event) => { if (event.key === 'Enter') savePanelSize(); }}
+            />
+            <button type="button" onClick={savePanelSize}>Set screen size</button>
+            {measuredMmPerCssPx !== null && (
+              <button type="button" onClick={clearPanelSize}>Use device default</button>
+            )}
+          </span>
+        )}
         <button type="button" className={trueWindow ? 'on' : ''}
           title="Build the view from where your eye actually is. Faces stop stretching toward the edges; the frame is cropped with depth, as a window crops it."
-          onClick={() => setTrueWindow((v) => !v)}>
+          onClick={toggleTrueWindow}>
           True window {trueWindow ? 'on' : 'off'}
         </button>
         <button type="button" className={pushMm ? 'on' : ''}

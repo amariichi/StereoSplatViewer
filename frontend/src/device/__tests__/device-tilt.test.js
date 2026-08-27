@@ -24,9 +24,12 @@ import {
   MAX_TILT_CORRECTION_RAD,
   clampTiltCorrection,
   computeScreenRoll,
+  createGravityFilter,
   createRollFilter,
   createTiltTracker,
+  computeScreenHeading,
   removeOrientationOffset,
+  requestOrientationPermission,
   requestTiltPermission,
   wrapAngle,
 } from '../device-tilt.js';
@@ -133,6 +136,122 @@ test('the roll filter follows the shortest way round rather than unwinding', () 
 });
 
 
+test('screen heading follows the screen normal instead of assuming alpha is yaw', () => {
+  // Portrait upright is the easy case: heading and alpha agree.
+  assert.ok(Math.abs(deg(computeScreenHeading({ alpha: 25, beta: 90, gamma: 0 })) - 25) < 1e-9);
+  assert.ok(Math.abs(deg(computeScreenHeading({ alpha: -25, beta: 90, gamma: 0 })) + 25) < 1e-9);
+
+  // With both pitch and roll present, alpha alone is not the azimuth of the
+  // glass. This expected value is the horizontal projection of the rotated
+  // positive screen normal.
+  const alpha = 15;
+  const beta = 55;
+  const gamma = 18;
+  const a = alpha * Math.PI / 180;
+  const b = beta * Math.PI / 180;
+  const g = gamma * Math.PI / 180;
+  const normalX = Math.cos(a) * Math.sin(g) + Math.sin(a) * Math.sin(b) * Math.cos(g);
+  const normalY = Math.sin(a) * Math.sin(g) - Math.cos(a) * Math.sin(b) * Math.cos(g);
+  const expected = Math.atan2(normalX, -normalY);
+  assert.ok(Math.abs(computeScreenHeading({ alpha, beta, gamma }) - expected) < 1e-12);
+  assert.notEqual(computeScreenHeading({ alpha, beta, gamma }), a);
+});
+
+
+test('screen heading is unavailable while the glass normal is vertical', () => {
+  assert.equal(computeScreenHeading({ alpha: 0, beta: 0, gamma: 0 }), null);
+  assert.equal(computeScreenHeading({ alpha: null, beta: 90, gamma: 0 }), null);
+  assert.equal(computeScreenHeading(null), null);
+});
+
+
+test('the gravity filter damps all three axes with elapsed time', () => {
+  const filter = createGravityFilter({ timeConstantMs: 1000 });
+  assert.equal(filter.get(), null);
+  assert.deepEqual(filter.update({ x: 0, y: G, z: 0 }, 0), { x: 0, y: G, z: 0 });
+
+  const damped = filter.update({ x: G, y: 0, z: G }, 100);
+  assert.ok(damped.x > 0 && damped.x < G * 0.2, `expected damped x, got ${damped.x}`);
+  assert.ok(damped.y > G * 0.8 && damped.y < G, `expected retained y, got ${damped.y}`);
+  assert.ok(damped.z > 0 && damped.z < G * 0.2, `expected damped z, got ${damped.z}`);
+
+  // A malformed sensor event must not poison the accumulated stable value.
+  assert.deepEqual(filter.update({ x: Number.NaN, y: G, z: 0 }, 200), damped);
+  filter.reset();
+  assert.equal(filter.get(), null);
+});
+
+
+test('the tracker publishes smoothed gravity while retaining raw diagnostics', async () => {
+  const listeners = new Map();
+  const target = {
+    addEventListener: (type, handler) => listeners.set(type, handler),
+    removeEventListener: (type) => listeners.delete(type),
+  };
+  let timestamp = 0;
+  const published = [];
+  const tracker = createTiltTracker({
+    target,
+    screen: { orientation: { angle: 0 } },
+    now: () => timestamp,
+    gravityTimeConstantMs: 1000,
+    gravityDeadbandRad: 0,
+    onRoll: (_roll, reading) => published.push(reading),
+  });
+  await tracker.start();
+
+  listeners.get('devicemotion')({ accelerationIncludingGravity: { x: 0, y: G, z: 0 } });
+  timestamp = 100;
+  listeners.get('devicemotion')({ accelerationIncludingGravity: { x: G, y: 0, z: G } });
+
+  assert.deepEqual(tracker.getReading(), { x: G, y: 0, z: G, screenAngle: 0 });
+  const smoothed = published.at(-1);
+  assert.ok(smoothed.x > 0 && smoothed.x < G * 0.2);
+  assert.ok(smoothed.y > G * 0.8 && smoothed.y < G);
+  assert.ok(smoothed.z > 0 && smoothed.z < G * 0.2);
+  assert.deepEqual(tracker.getSmoothedReading(), smoothed);
+
+  tracker.stop();
+  assert.equal(tracker.getSmoothedReading(), null);
+});
+
+
+test('the tracker suppresses tiny gravity jitter without losing slow motion', async () => {
+  const listeners = new Map();
+  const target = {
+    addEventListener: (type, handler) => listeners.set(type, handler),
+    removeEventListener: (type) => listeners.delete(type),
+  };
+  const held = (degrees) => ({
+    x: -G * Math.sin((degrees * Math.PI) / 180),
+    y: G * Math.cos((degrees * Math.PI) / 180),
+    z: 0,
+  });
+  let timestamp = 0;
+  const published = [];
+  const tracker = createTiltTracker({
+    target,
+    screen: { orientation: { angle: 0 } },
+    now: () => timestamp,
+    gravityTimeConstantMs: 1,
+    gravityDeadbandRad: (0.5 * Math.PI) / 180,
+    onRoll: (_roll, reading) => published.push(reading),
+  });
+  await tracker.start();
+
+  listeners.get('devicemotion')({ accelerationIncludingGravity: held(0) });
+  timestamp = 500;
+  listeners.get('devicemotion')({ accelerationIncludingGravity: held(0.1) });
+  assert.equal(published.length, 1);
+
+  // The deadband is measured from the last publication, so several small
+  // intentional changes eventually cross it instead of being lost forever.
+  timestamp = 1000;
+  listeners.get('devicemotion')({ accelerationIncludingGravity: held(1) });
+  assert.equal(published.length, 2);
+});
+
+
 test('the tracker starts only with permission and stops listening cleanly', async () => {
   const listeners = new Map();
   const target = {
@@ -164,7 +283,62 @@ test('the tracker starts only with permission and stops listening cleanly', asyn
   tracker.stop();
   assert.equal(tracker.running, false);
   assert.equal(listeners.has('devicemotion'), false);
+  assert.equal(listeners.has('deviceorientation'), false);
   assert.equal(tracker.getRoll(), null);
+  assert.equal(tracker.getHeading(), null);
+});
+
+
+test('the tracker smooths and publishes relative-heading input independently of gravity', async () => {
+  const listeners = new Map();
+  const target = {
+    addEventListener: (type, handler) => listeners.set(type, handler),
+    removeEventListener: (type) => listeners.delete(type),
+  };
+  let timestamp = 0;
+  const headings = [];
+  const tracker = createTiltTracker({
+    target,
+    screen: { orientation: { angle: 0 } },
+    now: () => timestamp,
+    headingTimeConstantMs: 1000,
+    headingDeadbandRad: 0,
+    onHeading: (heading) => headings.push(heading),
+  });
+  assert.equal(await tracker.start(), 'granted');
+
+  listeners.get('deviceorientation')({ alpha: 359, beta: 90, gamma: 0 });
+  timestamp = 100;
+  listeners.get('deviceorientation')({ alpha: 1, beta: 90, gamma: 0 });
+
+  // It takes the short path through zero and remains damped rather than
+  // interpreting 359 -> 1 as a near-complete turn.
+  assert.equal(headings.length, 2);
+  assert.ok(Math.abs(deg(wrapAngle(headings[1] - headings[0]))) < 1);
+  assert.ok(Math.abs(deg(wrapAngle(tracker.getHeading() - headings[0]))) < 1);
+
+  tracker.stop();
+  assert.equal(listeners.has('deviceorientation'), false);
+  assert.equal(tracker.getHeading(), null);
+});
+
+
+test('refused orientation access keeps gravity levelling available', async () => {
+  const listeners = new Map();
+  const target = {
+    addEventListener: (type, handler) => listeners.set(type, handler),
+    removeEventListener: (type) => listeners.delete(type),
+  };
+  const tracker = createTiltTracker({
+    target,
+    screen: { orientation: { angle: 0 } },
+    motionEvent: { requestPermission: async () => 'granted' },
+    orientationEvent: { requestPermission: async () => 'denied' },
+  });
+
+  assert.equal(await tracker.start(), 'granted');
+  assert.equal(listeners.has('devicemotion'), true);
+  assert.equal(listeners.has('deviceorientation'), false);
 });
 
 
@@ -188,5 +362,9 @@ test('platforms without a permission gate report granted', async () => {
   assert.equal(await requestTiltPermission({ motionEvent: undefined }), 'granted');
   assert.equal(await requestTiltPermission({
     motionEvent: { requestPermission: async () => { throw new Error('blocked'); } },
+  }), 'denied');
+  assert.equal(await requestOrientationPermission({ orientationEvent: undefined }), 'granted');
+  assert.equal(await requestOrientationPermission({
+    orientationEvent: { requestPermission: async () => { throw new Error('blocked'); } },
   }), 'denied');
 });

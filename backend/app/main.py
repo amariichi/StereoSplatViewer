@@ -21,7 +21,7 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadF
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-from .services import focal, mlsharp, mode360, sharp_pool, sky, sog, storage
+from .services import focal, mlsharp, mode360, ply_camera, sharp_pool, sky, sog, storage
 
 LOGGER = logging.getLogger(__name__)
 
@@ -221,6 +221,9 @@ async def latest_scene() -> JSONResponse:
         **latest,
         "plyUrl": f"/api/scene/{latest['jobId']}/{latest['name']}{stamp}",
     }
+    projection = ply_camera.read_capture_projection(storage.published_ply(latest["jobId"]))
+    if projection:
+        payload["projection"] = projection
     if storage.sog_path(latest["jobId"]).is_file():
         payload["sogUrl"] = f"/api/scene/{latest['jobId']}/scene.sog{stamp}"
     # So that a viewer which did not make this scene can still tell whether the
@@ -461,6 +464,18 @@ def get_lens(job_id: str) -> JSONResponse:
     if not storage.job_dir(job_id).exists():
         raise HTTPException(status_code=404, detail="no such scene")
     return JSONResponse(storage.read_lens(job_id), headers={"Cache-Control": _NEVER})
+
+
+@app.get("/api/scene/{job_id}/projection")
+def get_projection(job_id: str) -> JSONResponse:
+    """Capture projection embedded in the full PLY, also usable by SOG clients."""
+
+    projection = ply_camera.read_capture_projection(storage.published_ply(job_id))
+    if projection is None:
+        raise HTTPException(status_code=404, detail="no capture projection for this scene")
+    # Relensing rebuilds this path in place under the same job id. Keep the
+    # tiny answer fresh instead of retaining the old intrinsics for a year.
+    return JSONResponse(projection, headers={"Cache-Control": _NEVER})
 
 
 @app.get("/api/scene/{job_id}/logs")

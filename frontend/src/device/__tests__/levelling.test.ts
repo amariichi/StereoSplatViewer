@@ -3,8 +3,15 @@ import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_LEVELLING_GAIN,
   MAX_LEVELLING_RAD,
+  TRUE_WINDOW_LEVELLING_GAIN,
   computeLevelling,
+  counterRotateEye,
+  eyeInYawReferenceFrame,
+  rotateVectorByQuaternion,
+  sceneYawForDevice,
+  sceneRotationForMode,
   toQuaternion,
+  type Vec3,
   upInDeviceFrame,
 } from '../levelling';
 import { computeScreenRoll } from '../device-tilt.js';
@@ -134,5 +141,213 @@ describe('as a quaternion', () => {
     const qTip = toQuaternion(computeLevelling(tippedBack(20), { reference })!);
     expect(Math.abs(qTip.x)).toBeGreaterThan(0.05);
     expect(Math.abs(qTip.z)).toBeCloseTo(0, 9);
+  });
+});
+
+describe('fusing gravity attitude with the tracked eye', () => {
+  const upright = upInDeviceFrame(tippedBack(0))!;
+
+  it('uses full response in True Window while retaining the finite-scene cap', () => {
+    const ordinary = computeLevelling(tippedBack(12), {
+      reference: upright,
+      gain: TRUE_WINDOW_LEVELLING_GAIN,
+    })!;
+    expect(deg(ordinary.tip)).toBeCloseTo(12, 6);
+
+    const beyondCoverage = computeLevelling(tippedBack(40), {
+      reference: upright,
+      gain: TRUE_WINDOW_LEVELLING_GAIN,
+    })!;
+    expect(deg(beyondCoverage.tip)).toBeCloseTo(18, 6);
+  });
+
+  it('removes the device-attitude component from a tracked eye', () => {
+    const attitude = toQuaternion(computeLevelling(tippedBack(12), {
+      reference: upright,
+      gain: TRUE_WINDOW_LEVELLING_GAIN,
+    })!);
+    const baselineEye = { x: 0.25, y: -0.15, z: 5.5 };
+    const eyeReportedInTurnedDevice = rotateVectorByQuaternion(baselineEye, attitude);
+    const fused = counterRotateEye(eyeReportedInTurnedDevice, attitude);
+    expect(fused.x).toBeCloseTo(baselineEye.x, 10);
+    expect(fused.y).toBeCloseTo(baselineEye.y, 10);
+    expect(fused.z).toBeCloseTo(baselineEye.z, 10);
+  });
+
+  it('preserves real head translation while changing its coordinate frame', () => {
+    const attitude = toQuaternion(computeLevelling({
+      x: -G * 0.25,
+      y: G * 0.9,
+      z: G * 0.35,
+    }, {
+      reference: upright,
+      gain: TRUE_WINDOW_LEVELLING_GAIN,
+    })!);
+    const baseline = { x: 0, y: 0, z: 6 };
+    const moved = { x: 0.4, y: -0.25, z: 5.7 };
+    const reportedBaseline = rotateVectorByQuaternion(baseline, attitude);
+    const reportedMoved = rotateVectorByQuaternion(moved, attitude);
+    const fusedBaseline = counterRotateEye(reportedBaseline, attitude);
+    const fusedMoved = counterRotateEye(reportedMoved, attitude);
+    expect(fusedMoved.x - fusedBaseline.x).toBeCloseTo(moved.x - baseline.x, 10);
+    expect(fusedMoved.y - fusedBaseline.y).toBeCloseTo(moved.y - baseline.y, 10);
+    expect(fusedMoved.z - fusedBaseline.z).toBeCloseTo(moved.z - baseline.z, 10);
+  });
+
+  it('turns a former steady-state cancellation into a cue matching Hold level off', () => {
+    const attitude = toQuaternion(computeLevelling(tippedBack(12), {
+      reference: upright,
+      gain: TRUE_WINDOW_LEVELLING_GAIN,
+    })!);
+    const baselineEye = { x: 0, y: 0, z: 6 };
+    const subject = { x: 0, y: 0, z: -3 };
+    const reportedEye = rotateVectorByQuaternion(baselineEye, attitude);
+    const formerlyTurnedSubject = rotateVectorByQuaternion(subject, attitude);
+    const projectY = (eye: Vec3, point: Vec3) => (
+      (eye.z * point.y - point.z * eye.y) / (eye.z - point.z)
+    );
+
+    // Applying the same rotation to both was the spring-cancelled state.
+    expect(projectY(reportedEye, formerlyTurnedSubject)).toBeCloseTo(0, 10);
+
+    const withoutHoldLevel = projectY(reportedEye, subject);
+    const sceneAttitude = sceneRotationForMode(attitude, { trueWindow: true })!;
+    const withHoldLevel = projectY(
+      counterRotateEye(reportedEye, attitude),
+      rotateVectorByQuaternion(subject, sceneAttitude),
+    );
+    expect(Math.abs(withHoldLevel)).toBeGreaterThan(0.1);
+    expect(Math.sign(withHoldLevel)).toBe(Math.sign(withoutHoldLevel));
+  });
+
+  it('leaves the eye untouched without a usable attitude', () => {
+    const eye = { x: 0.2, y: -0.1, z: 5 };
+    expect(counterRotateEye(eye, null)).toEqual(eye);
+    expect(counterRotateEye(eye, { x: 0, y: Number.NaN, z: 0, w: 1 })).toEqual(eye);
+  });
+});
+
+describe('mode-specific scene rotation', () => {
+  const upright = upInDeviceFrame(tippedBack(0))!;
+
+  it('changes only the pitch sign in True Window, including the cross term', () => {
+    const levelling = { roll: rad(13), tip: rad(-9) };
+    const scene = sceneRotationForMode(toQuaternion(levelling), { trueWindow: true })!;
+    const expected = toQuaternion({ roll: levelling.roll, tip: -levelling.tip });
+    expect(scene.x).toBeCloseTo(expected.x, 12);
+    expect(scene.y).toBeCloseTo(expected.y, 12);
+    expect(scene.z).toBeCloseTo(expected.z, 12);
+    expect(scene.w).toBeCloseTo(expected.w, 12);
+  });
+
+  it('aligns model up with measured up for either direction of roll', () => {
+    // Stay below the deliberate 18-degree finite-scene coverage cap so this
+    // checks direction and exact response rather than saturation.
+    for (const degrees of [-15, -10, 10, 15]) {
+      const reading = rolled(degrees);
+      const attitude = toQuaternion(computeLevelling(reading, {
+        reference: upright,
+        gain: TRUE_WINDOW_LEVELLING_GAIN,
+      })!);
+      const scene = sceneRotationForMode(attitude, { trueWindow: true })!;
+      const modelUp = rotateVectorByQuaternion({ x: 0, y: 1, z: 0 }, scene);
+      const measuredUp = upInDeviceFrame(reading)!;
+      expect(modelUp.x).toBeCloseTo(measuredUp.x, 9);
+      expect(modelUp.y).toBeCloseTo(measuredUp.y, 9);
+      expect(modelUp.z).toBeCloseTo(0, 9);
+    }
+  });
+
+  it('reduces rather than amplifies either direction of photo-mode roll', () => {
+    for (const degrees of [-15, -8, 8, 15]) {
+      const reading = rolled(degrees);
+      const attitude = toQuaternion(computeLevelling(reading, { reference: upright })!);
+      const scene = sceneRotationForMode(attitude, { trueWindow: false })!;
+      const modelUp = rotateVectorByQuaternion({ x: 0, y: 1, z: 0 }, scene);
+      const measuredUp = upInDeviceFrame(reading)!;
+      expect(Math.sign(modelUp.x)).toBe(Math.sign(measuredUp.x));
+      expect(Math.abs(modelUp.x)).toBeLessThan(Math.abs(measuredUp.x));
+    }
+  });
+
+  it('does not let photo-mode Hold level interfere with pitch viewpoint', () => {
+    const reading = tippedBack(12);
+    const fullAttitude = toQuaternion(computeLevelling(reading, {
+      reference: upright,
+      gain: TRUE_WINDOW_LEVELLING_GAIN,
+    })!);
+    const photoAttitude = toQuaternion(computeLevelling(reading, { reference: upright })!);
+    const photoScene = sceneRotationForMode(photoAttitude, { trueWindow: false });
+    expect(photoScene).toBe(null);
+
+    const baselineEye = { x: 0, y: 0, z: 6 };
+    const subject = { x: 0, y: 0, z: -3 };
+    const reportedEye = rotateVectorByQuaternion(baselineEye, fullAttitude);
+    const projectY = (eye: Vec3, point: Vec3) => (
+      (eye.z * point.y - point.z * eye.y) / (eye.z - point.z)
+    );
+    // With no photo-mode pitch model turn, Hold level cannot cancel or reverse
+    // the up/down camera cue supplied by the face tracker.
+    const subjectWithHold = photoScene
+      ? rotateVectorByQuaternion(subject, photoScene)
+      : subject;
+    expect(projectY(reportedEye, subjectWithHold))
+      .toBeCloseTo(projectY(reportedEye, subject), 12);
+  });
+
+  it('keeps only roll from a combined photo-mode reading', () => {
+    const levelling = { roll: rad(11), tip: rad(8) };
+    const attitude = toQuaternion(levelling);
+    const scene = sceneRotationForMode(attitude, { trueWindow: false })!;
+    const expected = toQuaternion({ roll: levelling.roll, tip: 0 });
+    expect(scene.x).toBeCloseTo(expected.x, 12);
+    expect(scene.y).toBeCloseTo(expected.y, 12);
+    expect(scene.z).toBeCloseTo(expected.z, 12);
+    expect(scene.w).toBeCloseTo(expected.w, 12);
+  });
+});
+
+describe('fusing device yaw separately from face translation', () => {
+  it('moves a camera-frame eye back into the heading reference frame', () => {
+    const yaw = rad(14);
+    const baseline = { x: 0.25, y: -0.1, z: 6 };
+    // A fixed world-space eye is seen through the inverse of the phone turn.
+    const reported = rotateVectorByQuaternion(baseline, sceneYawForDevice(yaw));
+    const fused = eyeInYawReferenceFrame(reported, yaw);
+    expect(fused.x).toBeCloseTo(baseline.x, 10);
+    expect(fused.y).toBeCloseTo(baseline.y, 10);
+    expect(fused.z).toBeCloseTo(baseline.z, 10);
+  });
+
+  it('preserves a real head translation while removing phone yaw', () => {
+    const yaw = rad(-17);
+    const baseline = { x: 0, y: 0, z: 6 };
+    const moved = { x: 0.45, y: -0.2, z: 5.7 };
+    const phoneFrame = sceneYawForDevice(yaw);
+    const fusedBaseline = eyeInYawReferenceFrame(
+      rotateVectorByQuaternion(baseline, phoneFrame), yaw,
+    );
+    const fusedMoved = eyeInYawReferenceFrame(
+      rotateVectorByQuaternion(moved, phoneFrame), yaw,
+    );
+    expect(fusedMoved.x - fusedBaseline.x).toBeCloseTo(moved.x - baseline.x, 10);
+    expect(fusedMoved.y - fusedBaseline.y).toBeCloseTo(moved.y - baseline.y, 10);
+    expect(fusedMoved.z - fusedBaseline.z).toBeCloseTo(moved.z - baseline.z, 10);
+  });
+
+  it('uses inverse turns for the eye frame and the world behind the glass', () => {
+    const yaw = rad(12);
+    const forward = { x: 0, y: 0, z: 1 };
+    const worldInPhone = rotateVectorByQuaternion(forward, sceneYawForDevice(yaw));
+    const recovered = eyeInYawReferenceFrame(worldInPhone, yaw);
+    expect(Math.sign(worldInPhone.x)).toBe(-1);
+    expect(recovered.x).toBeCloseTo(0, 10);
+    expect(recovered.z).toBeCloseTo(1, 10);
+  });
+
+  it('is harmless without a finite heading', () => {
+    const eye = { x: 0.2, y: -0.1, z: 5 };
+    expect(eyeInYawReferenceFrame(eye, Number.NaN)).toEqual(eye);
+    expect(sceneYawForDevice(Number.NaN)).toEqual({ x: 0, y: 0, z: 0, w: 1 });
   });
 });

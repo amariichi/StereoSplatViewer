@@ -19,11 +19,19 @@
 // correction at its cap in opposite directions -- the device tilted left in
 // portrait and right in landscape, never level.
 //
-// Only roll within the screen plane is used. That is referenced to gravity and
-// therefore does not drift, unlike a heading, which would need the
-// magnetometer and would wander indoors.
+// Gravity cannot distinguish a turn about world-up. That last axis is read
+// separately from DeviceOrientation: only the change since Hold level began is
+// used, so no claim is made about magnetic north and Recenter can discard drift.
 
 export const DEFAULT_TILT_TIME_CONSTANT_MS = 220;
+
+// Full-vector smoothing for the two-axis levelling path. Kept shorter than the
+// legacy roll filter so deliberate turns still feel immediate, while the
+// accelerometer noise visible in a nominally still hand is attenuated.
+export const DEFAULT_GRAVITY_TIME_CONSTANT_MS = 120;
+export const DEFAULT_GRAVITY_DEADBAND_RAD = (0.2 * Math.PI) / 180;
+export const DEFAULT_HEADING_TIME_CONSTANT_MS = 100;
+export const DEFAULT_HEADING_DEADBAND_RAD = (0.2 * Math.PI) / 180;
 
 // The scene is not infinite: it is a picture with edges, so counter-rotating it
 // fully would swing its corners into view and expose the background behind
@@ -72,6 +80,27 @@ export function wrapAngle(angle) {
   return wrapped;
 }
 
+/**
+ * Horizontal direction of the glass normal from DeviceOrientation Euler data.
+ *
+ * The API's intrinsic order is Z-X'-Y'' (`alpha`, `beta`, `gamma`). `alpha`
+ * alone is therefore a glass heading only for one special upright posture. We
+ * rotate the positive screen normal `(0, 0, 1)` and take its horizontal
+ * azimuth. When the phone lies flat that projection vanishes and yaw is
+ * genuinely undefined, so no stale or noisy angle is invented.
+ */
+export function computeScreenHeading(orientation) {
+  const values = [orientation?.alpha, orientation?.beta, orientation?.gamma];
+  if (!values.every((value) => typeof value === 'number' && Number.isFinite(value))) return null;
+  const [alpha, beta, gamma] = values.map((degrees) => (degrees * Math.PI) / 180);
+  const normalX = Math.cos(alpha) * Math.sin(gamma)
+    + Math.sin(alpha) * Math.sin(beta) * Math.cos(gamma);
+  const normalY = Math.sin(alpha) * Math.sin(gamma)
+    - Math.cos(alpha) * Math.sin(beta) * Math.cos(gamma);
+  if (Math.hypot(normalX, normalY) < 1e-3) return null;
+  return wrapAngle(Math.atan2(normalX, -normalY));
+}
+
 export function clampTiltCorrection(roll, {
   gain = DEFAULT_TILT_GAIN,
   maxCorrection = MAX_TILT_CORRECTION_RAD,
@@ -113,6 +142,60 @@ export function createRollFilter({ timeConstantMs = DEFAULT_TILT_TIME_CONSTANT_M
   };
 }
 
+/** Time-based exponential smoothing for the complete gravity vector. */
+export function createGravityFilter({
+  timeConstantMs = DEFAULT_GRAVITY_TIME_CONSTANT_MS,
+} = {}) {
+  let filtered = null;
+  let lastTimestamp = null;
+  return {
+    reset() {
+      filtered = null;
+      lastTimestamp = null;
+    },
+    get: () => (filtered ? { ...filtered } : null),
+    update(gravity, timestamp) {
+      const next = {
+        x: Number(gravity?.x),
+        y: Number(gravity?.y),
+        z: Number(gravity?.z),
+      };
+      if (![next.x, next.y, next.z].every(Number.isFinite)
+          || Math.hypot(next.x, next.y, next.z) < MIN_GRAVITY_MAGNITUDE) {
+        return filtered ? { ...filtered } : null;
+      }
+      if (!filtered || !Number.isFinite(lastTimestamp) || !Number.isFinite(timestamp)) {
+        filtered = next;
+        lastTimestamp = timestamp;
+        return { ...filtered };
+      }
+      const delta = Math.max(0, Math.min(timestamp - lastTimestamp, 500));
+      const safeTimeConstant = Number.isFinite(timeConstantMs) && timeConstantMs > 0
+        ? timeConstantMs : DEFAULT_GRAVITY_TIME_CONSTANT_MS;
+      const alpha = 1 - Math.exp(-delta / safeTimeConstant);
+      filtered = {
+        x: filtered.x + (next.x - filtered.x) * alpha,
+        y: filtered.y + (next.y - filtered.y) * alpha,
+        z: filtered.z + (next.z - filtered.z) * alpha,
+      };
+      lastTimestamp = timestamp;
+      return { ...filtered };
+    },
+  };
+}
+
+function unitDirection(vector) {
+  const magnitude = Math.hypot(vector?.x, vector?.y, vector?.z);
+  if (!(magnitude > 0) || !Number.isFinite(magnitude)) return null;
+  return { x: vector.x / magnitude, y: vector.y / magnitude, z: vector.z / magnitude };
+}
+
+function angularDifference(a, b) {
+  if (!a || !b) return Infinity;
+  const dot = Math.min(Math.max(a.x * b.x + a.y * b.y + a.z * b.z, -1), 1);
+  return Math.acos(dot);
+}
+
 // iOS gates motion events behind a call made from a user gesture. Everywhere
 // else the events simply arrive.
 export async function requestTiltPermission({ motionEvent = globalThis.DeviceMotionEvent } = {}) {
@@ -124,19 +207,46 @@ export async function requestTiltPermission({ motionEvent = globalThis.DeviceMot
   }
 }
 
+/** Orientation permission is optional: gravity levelling remains useful without it. */
+export async function requestOrientationPermission({
+  orientationEvent = globalThis.DeviceOrientationEvent,
+} = {}) {
+  if (typeof orientationEvent?.requestPermission !== 'function') return 'granted';
+  try {
+    return await orientationEvent.requestPermission();
+  } catch {
+    return 'denied';
+  }
+}
+
 export function createTiltTracker({
   target = globalThis,
   screen = globalThis.screen,
   now = () => globalThis.performance?.now?.() ?? Date.now(),
   timeConstantMs = DEFAULT_TILT_TIME_CONSTANT_MS,
+  gravityTimeConstantMs = DEFAULT_GRAVITY_TIME_CONSTANT_MS,
+  gravityDeadbandRad = DEFAULT_GRAVITY_DEADBAND_RAD,
+  headingTimeConstantMs = DEFAULT_HEADING_TIME_CONSTANT_MS,
+  headingDeadbandRad = DEFAULT_HEADING_DEADBAND_RAD,
+  motionEvent = globalThis.DeviceMotionEvent,
+  orientationEvent = globalThis.DeviceOrientationEvent,
   onRoll = () => {},
+  onHeading = () => {},
 } = {}) {
   const filter = createRollFilter({ timeConstantMs });
+  const gravityFilter = createGravityFilter({ timeConstantMs: gravityTimeConstantMs });
+  const headingFilter = createRollFilter({ timeConstantMs: headingTimeConstantMs });
   let running = false;
+  let orientationListening = false;
   let lastRawRoll = null;
+  let lastRawHeading = null;
   // Kept so the raw inputs can be read off a device, since which frame a
   // platform reports gravity in cannot be settled by reasoning about the spec.
   let lastReading = null;
+  let lastSmoothedReading = null;
+  let lastEmittedDirection = null;
+  let lastEmittedScreenAngle = null;
+  let lastEmittedHeading = null;
 
   function handleMotion(event) {
     const gravity = event?.accelerationIncludingGravity;
@@ -150,8 +260,39 @@ export function createTiltTracker({
     };
     if (roll === null) return;
     lastRawRoll = roll;
-    const smoothed = filter.update(roll, now());
-    if (smoothed !== null) onRoll(smoothed);
+    const timestamp = now();
+    const smoothedRoll = filter.update(roll, timestamp);
+    const smoothedGravity = gravityFilter.update(lastReading, timestamp);
+    if (smoothedRoll === null || !smoothedGravity) return;
+    lastSmoothedReading = { ...smoothedGravity, screenAngle };
+
+    // Compare unit vectors so a small change in accelerometer magnitude does
+    // not count as a rotation. The comparison is against the last EMITTED
+    // direction, so slow intentional motion accumulates rather than being
+    // swallowed one sub-threshold sample at a time.
+    const direction = unitDirection(smoothedGravity);
+    const threshold = Number.isFinite(gravityDeadbandRad) && gravityDeadbandRad >= 0
+      ? gravityDeadbandRad : DEFAULT_GRAVITY_DEADBAND_RAD;
+    const shouldEmit = screenAngle !== lastEmittedScreenAngle
+      || angularDifference(direction, lastEmittedDirection) >= threshold;
+    if (!shouldEmit) return;
+    lastEmittedDirection = direction;
+    lastEmittedScreenAngle = screenAngle;
+    onRoll(smoothedRoll, lastSmoothedReading);
+  }
+
+  function handleOrientation(event) {
+    const heading = computeScreenHeading(event);
+    if (heading === null) return;
+    lastRawHeading = heading;
+    const smoothedHeading = headingFilter.update(heading, now());
+    if (smoothedHeading === null) return;
+    const threshold = Number.isFinite(headingDeadbandRad) && headingDeadbandRad >= 0
+      ? headingDeadbandRad : DEFAULT_HEADING_DEADBAND_RAD;
+    if (lastEmittedHeading !== null
+        && Math.abs(wrapAngle(smoothedHeading - lastEmittedHeading)) < threshold) return;
+    lastEmittedHeading = smoothedHeading;
+    onHeading(smoothedHeading);
   }
 
   return {
@@ -160,22 +301,53 @@ export function createTiltTracker({
     },
     getRawRoll: () => lastRawRoll,
     getReading: () => lastReading,
+    getSmoothedReading: () => lastSmoothedReading,
     getRoll: () => filter.get(),
+    getRawHeading: () => lastRawHeading,
+    getHeading: () => headingFilter.get(),
     async start() {
       if (running) return 'granted';
-      const permission = await requestTiltPermission();
+      // Invoke both gated APIs before the first await so iOS sees both requests
+      // inside the same user activation. Heading is optional; refusing it must
+      // not take the already-working gravity stabiliser away.
+      const motionPermission = requestTiltPermission({ motionEvent });
+      const orientationPermission = requestOrientationPermission({ orientationEvent });
+      const [permission, headingPermission] = await Promise.all([
+        motionPermission,
+        orientationPermission,
+      ]);
       if (permission !== 'granted') return permission;
       filter.reset();
+      gravityFilter.reset();
+      headingFilter.reset();
+      lastSmoothedReading = null;
+      lastEmittedDirection = null;
+      lastEmittedScreenAngle = null;
+      lastRawHeading = null;
+      lastEmittedHeading = null;
       target.addEventListener('devicemotion', handleMotion);
+      if (headingPermission === 'granted') {
+        target.addEventListener('deviceorientation', handleOrientation);
+        orientationListening = true;
+      }
       running = true;
       return 'granted';
     },
     stop() {
       if (!running) return;
       target.removeEventListener('devicemotion', handleMotion);
+      if (orientationListening) target.removeEventListener('deviceorientation', handleOrientation);
       running = false;
+      orientationListening = false;
       filter.reset();
+      gravityFilter.reset();
+      headingFilter.reset();
       lastRawRoll = null;
+      lastRawHeading = null;
+      lastSmoothedReading = null;
+      lastEmittedDirection = null;
+      lastEmittedScreenAngle = null;
+      lastEmittedHeading = null;
     },
   };
 }

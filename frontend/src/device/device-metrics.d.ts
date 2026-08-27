@@ -39,6 +39,12 @@ export function resolveScreenMetrics(input?: {
   measuredMmPerCssPx?: number | null;
 }): ScreenMetrics;
 
+export function mmPerCssPxFromPanelLongSide(input: {
+  panelLongSideMm: number;
+  screenWidth?: number;
+  screenHeight?: number;
+}): number;
+
 export type ViewingGeometry = {
   screenHeightMm: number;
   /** Millimetres per world unit; one unit is half the screen's height. */
@@ -54,6 +60,12 @@ export function computeViewingGeometry(input: {
   mmPerCssPx: number;
   viewingDistanceMm?: number;
 }): ViewingGeometry;
+
+export function preservePhysicalPoint(
+  point: { x: number; y: number; z: number },
+  previousWorldUnitMm: number,
+  nextWorldUnitMm: number,
+): { x: number; y: number; z: number };
 
 export function loadStoredNumber(storage: Storage | null | undefined, key: string): number | null;
 export function saveStoredNumber(storage: Storage | null | undefined, key: string, value: number | null): void;

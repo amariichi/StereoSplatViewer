@@ -7,12 +7,18 @@ export const FACE_LANDMARKER_MODEL_URL: string;
 export const DEFAULT_XY_GAIN: number;
 export const DEFAULT_Z_GAIN: number;
 export const FACE_LANDMARKER_DELEGATES: readonly string[];
+export const CANONICAL_CYCLOPEAN_EYE_CM: Readonly<{ x: number; y: number; z: number }>;
 
 export type EyePose = { x: number; y: number; z: number; timestamp?: number };
 
 export function getActiveDelegate(): string | null;
 export function preferredDelegates(requested?: string | null): string[];
 export function stopMediaStream(stream: MediaStream | null | undefined): void;
+export function extractMetricEyePosition(matrixData: unknown): {
+  xMm: number; yMm: number; distanceMm: number;
+} | null;
+/** @deprecated Use `extractMetricEyePosition`. */
+export const extractMetricHeadTranslation: typeof extractMetricEyePosition;
 
 export type HeadTrackerMetrics = {
   startedAt: number | null;

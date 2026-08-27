@@ -28,6 +28,16 @@ export const DEFAULT_Z_GAIN = 0.1;
 // camera space whose origin is the camera itself.
 const MM_PER_CM = 10;
 
+// Mean of canonical face landmarks 33, 133, 362 and 263 (the inner and outer
+// corners of both eyes), in the canonical model's centimetres. MediaPipe's
+// facial matrix transforms this model into camera space. Its translation alone
+// is the model origin around the middle of the face, not the viewer's eye.
+export const CANONICAL_CYCLOPEAN_EYE_CM = Object.freeze({
+  x: 0,
+  y: 2.624618,
+  z: 3.465663,
+});
+
 function finitePoint(point) {
   return point && Number.isFinite(point.x) && Number.isFinite(point.y);
 }
@@ -181,20 +191,27 @@ export function mapObservationToEyePose(observation, calibration, {
 }
 
 // MediaPipe's facial transformation matrix is a column-major 4x4 that maps the
-// canonical face model into camera space. Its translation column is the head
-// position in centimetres: +x to the camera's right, +y up, and -z away from
-// the camera. Reading it directly removes the guessed gains entirely.
-export function extractMetricHeadTranslation(matrixData) {
+// canonical face model into camera space. Transforming the canonical eye point
+// with the full matrix accounts for both its offset from the model origin and
+// the way that offset rotates with the face.
+export function extractMetricEyePosition(matrixData) {
   const data = matrixData?.data ?? matrixData;
   if (!data || data.length !== 16) return null;
-  const x = Number(data[12]);
-  const y = Number(data[13]);
-  const z = Number(data[14]);
+  const point = CANONICAL_CYCLOPEAN_EYE_CM;
+  const x = Number(data[0]) * point.x + Number(data[4]) * point.y
+    + Number(data[8]) * point.z + Number(data[12]);
+  const y = Number(data[1]) * point.x + Number(data[5]) * point.y
+    + Number(data[9]) * point.z + Number(data[13]);
+  const z = Number(data[2]) * point.x + Number(data[6]) * point.y
+    + Number(data[10]) * point.z + Number(data[14]);
   if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
   const distanceMm = Math.abs(z) * MM_PER_CM;
   if (!(distanceMm > 1)) return null;
   return { xMm: x * MM_PER_CM, yMm: y * MM_PER_CM, distanceMm };
 }
+
+/** @deprecated Use `extractMetricEyePosition`; kept for compatible imports. */
+export const extractMetricHeadTranslation = extractMetricEyePosition;
 
 // Converts a metric head position into the virtual screen's world units.
 //
@@ -240,7 +257,7 @@ export function mapMetricPoseToEyePose(metric, calibration, {
   // cancelled part of this and made the picture stop responding at all.
   //
   // Note that this is the opposite of what the comment above
-  // extractMetricHeadTranslation claims about MediaPipe's axes, and the
+  // extractMetricEyePosition claims about MediaPipe's axes, and the
   // opposite of what the landmark fallback below does. Neither disagreement is
   // explained. What can be said is that the claim there was never checked, that
   // MediaPipe is loaded at runtime and ships no documentation here to check it
@@ -489,7 +506,22 @@ export class HeadTracker {
   }
 
   setViewingGeometry({ worldUnitMm, baselineEyeZ }) {
-    if (Number.isFinite(worldUnitMm) && worldUnitMm > 0) this.worldUnitMm = worldUnitMm;
+    if (Number.isFinite(worldUnitMm) && worldUnitMm > 0) {
+      const previous = this.worldUnitMm;
+      if (Number.isFinite(previous) && previous > 0 && previous !== worldUnitMm) {
+        const filtered = this.filter.get();
+        if (filtered) {
+          const scale = previous / worldUnitMm;
+          this.filter.reset({
+            ...filtered,
+            x: filtered.x * scale,
+            y: filtered.y * scale,
+            z: filtered.z * scale,
+          }, filtered.timestamp);
+        }
+      }
+      this.worldUnitMm = worldUnitMm;
+    }
     if (Number.isFinite(baselineEyeZ) && baselineEyeZ > 0) this.baselineEyeZ = baselineEyeZ;
   }
 
@@ -593,7 +625,7 @@ export class HeadTracker {
       this.handleLostFace(timestamp);
       return;
     }
-    const metric = extractMetricHeadTranslation(result?.facialTransformationMatrixes?.[0]);
+    const metric = extractMetricEyePosition(result?.facialTransformationMatrixes?.[0]);
     if (metric) {
       observation.metric = metric;
       this.metrics.metricAvailable = true;
