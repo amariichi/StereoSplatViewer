@@ -103,6 +103,16 @@ export function resolveScreenMetrics({
   };
 }
 
+export function mmPerCssPxFromPanelLongSide({ panelLongSideMm, screenWidth, screenHeight }) {
+  const millimetres = positive(panelLongSideMm);
+  const width = positive(screenWidth);
+  const height = positive(screenHeight);
+  if (!millimetres || !width || !height) {
+    throw new Error('Screen calibration requires a positive panel length and screen dimensions.');
+  }
+  return millimetres / Math.max(width, height);
+}
+
 // The virtual screen used by the head-coupled projection is always two world
 // units tall and is mapped onto the whole canvas. One world unit is therefore
 // half the canvas's physical height, which is what converts millimetres of real
@@ -130,6 +140,23 @@ export function computeViewingGeometry({
     baselineEyeZ: distance / worldUnitMm,
     verticalFovDeg: (2 * Math.atan(worldUnitMm / distance) * 180) / Math.PI,
   };
+}
+
+/** Keep a world-space point at the same physical millimetre position. */
+export function preservePhysicalPoint(point, previousWorldUnitMm, nextWorldUnitMm) {
+  const previous = positive(previousWorldUnitMm);
+  const next = positive(nextWorldUnitMm);
+  if (!point || !previous || !next) {
+    throw new Error('Physical point conversion requires positive world-unit scales.');
+  }
+  const scale = previous / next;
+  const x = Number(point.x);
+  const y = Number(point.y);
+  const z = Number(point.z);
+  if (![x, y, z].every(Number.isFinite)) {
+    throw new Error('Physical point conversion requires finite XYZ coordinates.');
+  }
+  return { x: x * scale, y: y * scale, z: z * scale };
 }
 
 export function loadStoredNumber(storage, key) {

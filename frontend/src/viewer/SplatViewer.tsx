@@ -9,11 +9,19 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import * as pc from 'playcanvas';
 
+import {
+  counterRotateEye,
+  eyeInYawReferenceFrame,
+  sceneRotationForMode,
+  sceneYawForDevice,
+} from '../device/levelling';
 import type { StereoSettings, ViewerHandle } from '../types';
 import { computeOffAxisFrustum, computeStereoEye, effectiveBaseline, sanitizeEye } from './off-axis';
 import {
   apexDistance,
+  computeTrueWindowPlacement,
   computeWindowPlacement,
+  estimateDepthQuantile,
   estimateCaptureAspect,
   estimateCaptureTangent,
   mapTrackedEye,
@@ -52,14 +60,17 @@ export type HeadPose = {
   screenDistance: number;
 
   /**
-   * How to turn the scene so that it stands upright in the room while the
-   * device turns around it, as a quaternion. Two axes: gravity gives the tip
-   * and the roll, and heading would need a magnetometer that wanders indoors.
+   * The filtered pitch/roll attitude relative to where Hold level began. In
+   * True Window this turns the scene and also moves the metric eye into that
+   * reference frame before projection. Yaw is carried separately because
+   * gravity cannot observe a turn about world-up.
    */
   levelling?: { x: number; y: number; z: number; w: number } | null;
+  /** Phone turn about world-up since Hold level/Recenter, in radians. */
+  deviceYaw?: number;
   /** How large to make the miniature. Larger is bigger, and flatter. */
   sizeScale?: number;
-  /** How far into the frame to crop. 1 shows the whole photograph. */
+  /** Physical model scale in True Window; frame crop in photo mode. */
   zoom?: number;
   /** Sideways and vertical shift of the miniature, in window units. */
   pan?: { x: number; y: number };
@@ -137,6 +148,10 @@ type Props = {
   onOffscreenReadyChange?: (ready: boolean) => void;
   /** When given, the viewer becomes a window onto the scene rather than an orbit. */
   headPose?: HeadPose | null;
+  /** Exact vertical half-FOV tangent read from the source PLY, when present. */
+  captureTangentHint?: number | null;
+  /** Exact source image width/height read from the source PLY, when present. */
+  captureAspectHint?: number | null;
   /** Touch and wheel gestures, which in window mode the page has to interpret. */
   onGesture?: (gesture: {
     pinch?: number; panX?: number; panY?: number; twistDeg?: number; tipDeg?: number;
@@ -248,7 +263,10 @@ export function splatDistanceQuantile(
  * closer than the subject would otherwise set the whole placement.
  */
 export function nearSplatDistance(centers?: Float32Array): number | null {
-  return splatDistanceQuantile(centers, NEAR_ANCHOR_QUANTILE, NEAR_ANCHOR_STRIDE);
+  return estimateDepthQuantile(centers, {
+    quantile: NEAR_ANCHOR_QUANTILE,
+    stride: NEAR_ANCHOR_STRIDE,
+  });
 }
 
 /**
@@ -294,6 +312,8 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     onPlacement,
     onSceneProgress,
     onSceneAspect,
+    captureTangentHint = null,
+    captureAspectHint = null,
   },
   ref,
 ) {
@@ -314,6 +334,10 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
   const onSceneAspectRef = useRef(onSceneAspect);
   onSceneAspectRef.current = onSceneAspect;
   const captureTangentRef = useRef<number | null>(null);
+  const captureTangentHintRef = useRef<number | null>(captureTangentHint);
+  captureTangentHintRef.current = captureTangentHint;
+  const captureAspectHintRef = useRef<number | null>(captureAspectHint);
+  captureAspectHintRef.current = captureAspectHint;
   const subjectDistanceRef = useRef(DEFAULT_SUBJECT_DISTANCE);
   const anchorDistanceRef = useRef(DEFAULT_SUBJECT_DISTANCE);
   const splatEntityRef = useRef<pc.Entity | null>(null);
@@ -350,12 +374,19 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     const pose = headPoseRef.current;
     const tangent = captureTangentRef.current;
     if (!splat || !pose || !tangent) return;
-    const placement = computeWindowPlacement({
-      captureTangent: tangent,
-      anchorDistance: anchorDistanceRef.current,
-      sizeScale: pose.sizeScale ?? 1,
-      zoom: pose.zoom ?? 1,
-    });
+    const placement = pose.trueWindow
+      ? computeTrueWindowPlacement({
+        captureTangent: tangent,
+        anchorDistance: anchorDistanceRef.current,
+        // In a literal window pinch changes the miniature, never the aperture.
+        modelScale: (pose.sizeScale ?? 1) * (pose.zoom ?? 1),
+      })
+      : computeWindowPlacement({
+        captureTangent: tangent,
+        anchorDistance: anchorDistanceRef.current,
+        sizeScale: pose.sizeScale ?? 1,
+        zoom: pose.zoom ?? 1,
+      });
     windowHalfHeightRef.current = placement.windowHalfHeight;
 
     splat.setLocalScale(placement.scale, placement.scale, placement.scale);
@@ -400,22 +431,39 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     // measures sideways movement against an apex nearer than the device really
     // is, which multiplies the parallax and was reported as depth that felt
     // exaggerated and unpleasant.
-    const eye = sanitizeEye(tangent && !pose.trueWindow
+    const trackedEye = tangent && !pose.trueWindow
       ? mapTrackedEye({
         eye: pose.eye,
         nominalZ: pose.screenDistance,
         apex: apexDistance(tangent),
       })
-      : pose.eye);
+      : pose.eye;
+    // Gravity and the metric face tracker both observe a phone pitch. Applying
+    // the attitude to the scene while projecting from the raw camera-frame eye
+    // made those cues cancel once the phone stopped moving. True Window first
+    // expresses the eye in the posture captured by Hold level; real head
+    // translation survives, and the phone attitude remains as a model cue.
+    const gravityReferencedEye = pose.trueWindow && pose.levelling
+      ? counterRotateEye(trackedEye, pose.levelling)
+      : trackedEye;
+    // A phone yaw and a real sideways head translation produce similar camera
+    // x motion. DeviceOrientation identifies the former, so it can be removed
+    // without changing Reverse tracking, which is already correct for the
+    // latter. Photo mode uses the same reference frame while Hold level is on.
+    const eye = sanitizeEye(eyeInYawReferenceFrame(
+      gravityReferencedEye,
+      pose.deviceYaw ?? 0,
+    ));
     // The window's size comes from the placement: it is whatever the
     // photograph's own field of view fills, seen from the calibrated eye. The
     // scene is fitted behind it when it loads.
     const halfHeight = windowHalfHeightRef.current;
     const halfWidth = halfHeight * aspect;
 
-    // The rig stays square to the world, so the head position keeps the meaning
-    // the tracker gave it. The correction turns the scene about the origin,
-    // which is the centre of the window -- the one plane that must stay put.
+    // The rig stays square to the window. True Window fuses the eye above into
+    // the Hold-level reference frame. Scene attitude is resolved per axis:
+    // measured roll keeps model-up aligned with gravity, while pitch is
+    // reversed only in True Window and omitted from photo mode.
     rig.setPosition(0, 0, 0);
     rig.setEulerAngles(0, 0, 0);
     const q = pose.levelling;
@@ -424,11 +472,19 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     // happens to be tilted along.
     const spin = new pc.Quat().setFromEulerAngles(0, pose.spin ?? 0, 0);
     const tip = new pc.Quat().setFromEulerAngles(pose.tip ?? 0, 0, 0);
-    const level = q ? new pc.Quat(q.x, q.y, q.z, q.w) : pc.Quat.IDENTITY;
-    // Read right to left: level it, turn it on its turntable, then tip the
-    // whole turntable toward the viewer.
+    const sceneAttitude = sceneRotationForMode(q, { trueWindow: Boolean(pose.trueWindow) });
+    const level = sceneAttitude
+      ? new pc.Quat(sceneAttitude.x, sceneAttitude.y, sceneAttitude.z, sceneAttitude.w)
+      : pc.Quat.IDENTITY;
+    const deviceYaw = sceneYawForDevice(pose.deviceYaw ?? 0);
+    const yaw = new pc.Quat(deviceYaw.x, deviceYaw.y, deviceYaw.z, deviceYaw.w);
+    // Read right to left: level it, express the stationary world in the turned
+    // phone frame, turn the miniature on its turntable, then tip that turntable.
     sceneRootRef.current?.setLocalRotation(
-      new pc.Quat().mul2(tip, new pc.Quat().mul2(spin, level)),
+      new pc.Quat().mul2(
+        tip,
+        new pc.Quat().mul2(spin, new pc.Quat().mul2(yaw, level)),
+      ),
     );
 
     eyes.forEach((entity, index) => {
@@ -967,8 +1023,17 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     const distance = splatDistanceQuantile(centers, 0.5) ?? DEFAULT_SUBJECT_DISTANCE;
     anchorDistanceRef.current = nearSplatDistance(centers) ?? distance;
 
-    captureTangentRef.current = estimateCaptureTangent(centers);
-    onSceneAspectRef.current?.(estimateCaptureAspect(centers));
+    const hintedTangent = captureTangentHintRef.current;
+    captureTangentRef.current = typeof hintedTangent === 'number'
+      && Number.isFinite(hintedTangent) && hintedTangent > 0
+      ? hintedTangent
+      : estimateCaptureTangent(centers);
+    const hintedAspect = captureAspectHintRef.current;
+    onSceneAspectRef.current?.(
+      typeof hintedAspect === 'number' && Number.isFinite(hintedAspect) && hintedAspect > 0
+        ? hintedAspect
+        : estimateCaptureAspect(centers),
+    );
     subjectDistanceRef.current = distance;
 
     if (headPoseRef.current && splat) {
@@ -984,6 +1049,28 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     });
     drawnRef.current = null;
   }
+
+  // A named scene can finish loading from cache before its small projection
+  // metadata request returns. Apply a late exact hint to the already-loaded
+  // scene as well; otherwise only a reload would replace the heuristic.
+  useEffect(() => {
+    if (!splatEntityRef.current) return;
+    const tangent = captureTangentHintRef.current;
+    const aspect = captureAspectHintRef.current;
+    let projectionChanged = false;
+    if (typeof tangent === 'number' && Number.isFinite(tangent) && tangent > 0
+        && tangent !== captureTangentRef.current) {
+      captureTangentRef.current = tangent;
+      projectionChanged = true;
+    }
+    if (typeof aspect === 'number' && Number.isFinite(aspect) && aspect > 0) {
+      onSceneAspectRef.current?.(aspect);
+    }
+    if (projectionChanged) {
+      applyStereoToEyes();
+      forceRender();
+    }
+  }, [captureAspectHint, captureTangentHint, applyStereoToEyes, forceRender]);
 
   useEffect(() => {
     fovRef.current = fovDeg;

@@ -91,17 +91,17 @@ The cost of the second one is worth stating plainly: certificates issued by a pu
 
 ### Using it
 
-Press **Start 3D** and hold still while it calibrates. iOS asks for the camera and for motion access in that one press; refusing motion costs only the levelling. After that, pasting a picture starts the tracking by itself.
+Press **Start 3D** and hold still while it calibrates. iOS asks for the camera, gravity motion, and orientation access in that one press. Refusing gravity motion costs only levelling; refusing orientation still leaves pitch/roll levelling available, but disables phone-yaw separation. After that, pasting a picture starts the tracking by itself.
 
 **Paste image** turns whatever is on the clipboard into a scene, which is shorter than saving a picture and finding it again in a file picker. On a desktop you can paste with the keyboard instead. The scene takes a little while to build and the page says so while it does.
 
 **I am at N mm** corrects the tracker's idea of how far away you are. Press it while holding the device at the distance it names, measured however you like. The tracker fits a canonical face seen through an assumed lens, and neither assumption is checked against your device -- on one it read 300 mm with the eye really 150 from the glass. The error is a scale, so this one number fixes it at every distance, and it is remembered.
 
-**Hold level** keeps the scene still in the room while the device turns around it, using gravity. It is deliberately partial -- half the turn, up to 18 degrees -- because the scene is a photograph with edges and turning it all the way back would swing its corners into view. The reference is whatever posture you were holding when you pressed it, so **Recenter** takes it again along with the head calibration.
+**Hold level** uses gravity to relate the phone's pitch and roll to the posture in which it began. In True Window, roll aligns model-up with gravity and inverse pitch reveals over/under the phone in the same direction as the unassisted view; both respond at 100%, up to 18 degrees. The tracked eye is transformed into the same reference posture so the cues do not spring-cancel. Photo mode applies only half-strength roll: forward/back movement remains entirely head-tracked and therefore keeps the same direction with Hold level on or off. Device orientation independently supplies the phone's relative yaw: the viewer removes the apparent sideways face motion caused by turning the phone and turns the world behind the glass the other way. This preserves real head translation instead of using the same sign switch for both motions. Both gravity and heading are lightly smoothed, and tiny angular sensor jitter is ignored. Absolute compass north is never used. The pitch/roll cap remains because turning a finite single-image reconstruction farther can expose missing edges. **Recenter** captures all sensor references again along with the head calibration.
 
-**Reverse tracking** flips which way the view moves when you move your head, for a device that reports its front camera the other way round. It is remembered.
+**Reverse tracking** corrects the horizontal axis of a device's front camera. Leave it in the setting where moving your actual head looks right (ON on the tested phone); phone rotation is handled separately and does not change this setting. It is remembered.
 
-A **pinch** sets how much of the frame is on screen. Spreading crops in, which is the only lever a small screen leaves: the whole photograph looks life-sized only from close up -- how close depends on the lens, and the readout names the distance for the scene you are holding -- and cropping brings that out towards arm's length at the cost of the edges. Pinching the other way pulls back to show more, which is how a photograph wider than the screen is seen whole; the page opens that way by itself when the shapes do not match. The status line names the trade as you go, and **Reset view** puts it back.
+A **pinch** has mode-specific meaning. With **True window** on it uniformly changes the miniature's physical size while the phone glass remains the same physical aperture. With **True window** off it crops into or out of the source frame; this is how the photo-preserving mode trades edge content against apparent size. Switching modes resets the pinch value so a crop factor is never reused as a physical scale. **Reset view** also returns it to one.
 
 **Lens** appears when the photograph did not record what took it. `ml-sharp` assumes 30 mm in that case, and that assumption sets the shape of the scene, not just its scale -- on one measured image the subject sat 2.5 metres away at 30 mm and 6.9 at 85, with the depth stretched to match. A portrait built at 30 mm when it was taken at 85 comes out pressed flat.
 
@@ -109,11 +109,11 @@ So a picture pasted here that says nothing about its lens is not built straight 
 
 The lens cannot be judged before the scene exists, so the field stays afterwards: type a different number and press **Rebuild**. That runs `ml-sharp` again, which takes about as long as the first time. Nothing rebuilds on its own -- only when you press it. A scene whose photograph did record its lens is never asked about, and a 360 scene cannot be rebuilt this way at all, being six reconstructions merged rather than one.
 
-**True window** decides where the picture is drawn from. On, it is drawn from where your eye actually is: shapes hold as you tilt the device, and what the glass shows is cropped as it goes deeper, the way a real window crops it. Off, the whole photograph stays on screen at every depth, and the cost is that shapes stretch towards the edges. On is the default.
+**True window** decides where the picture is drawn from. On, it is drawn from where your eye actually is through a fixed physical aperture: shapes hold as you tilt the device, and what the glass shows is cropped as it goes deeper, the way a real window crops it. PLY camera intrinsics are used when present; the splats' angular spread is only the fallback. Off, the whole photograph stays on screen at every depth, and the cost is that shapes stretch towards the edges. On is the default.
 
 **Depth** slides the miniature further behind the glass, in steps. It sets how far back it sits and how widely it swings when you turn it with a finger -- nearer values keep the swing tight. It is not a depth-strength control: moving a whole scene away flattens it rather than deepening it.
 
-**Double tap** anywhere clears the controls and the readout away, and again brings them back. **Tap the readout** for the numbers the geometry is using, which is where to look if something seems wrong.
+**Double tap** anywhere clears the controls and the readout away, and again brings them back. **Tap the readout** for the numbers the geometry is using, which is where to look if something seems wrong. The detail view also accepts the lit panel's measured long side in millimetres. Use that on an unknown device if the status says `estimated`; the saved measurement overrides the device-density estimate.
 
 ## Quick start
 
@@ -288,11 +288,11 @@ StereoSplatViewer は、外部の `ml-sharp` を使って単一の写真から 3
 
 **I am at N mm** は追跡の距離感を較正します。ボタンが示す距離で端末を持ち、その状態で押してください。追跡は「想定サイズの標準顔」を「想定画角のカメラ」で見た前提で当てはめており、**どちらの想定も実機で検証されていません** — ある端末では実際 150mm なのに 300mm と報告しました。誤差は倍率なので、この1つの数字で全距離が直り、記憶されます。
 
-**Hold level** は、端末が回ってもシーンを部屋に対して据え置きます（重力を使用）。**意図的に半分だけ、18°まで**です。シーンは縁のある一枚の絵なので、完全に戻すと隅が画面に入ってしまうためです。基準は押した瞬間の持ち方なので、**Recenter** で頭の較正と一緒に取り直せます。
+**Hold level** は、開始時の持ち方を基準に、重力から端末の前後傾斜とロールを求めます。True Window では、ロールはモデルの上を重力由来の上方向へ合わせ、前後傾斜はモデルへ逆向きに与えることで、OFF時と同じ方向へ上下を覗けるようにします。どちらも **100%（最大18°）** です。追跡した目位置も同じ基準姿勢へ変換するため、バネのような相殺は起こしません。写真モードで補正するのは半分のロールだけです。前後方向はすべて顔追跡へ任せるため、Hold level のON/OFFで上下方向が変わりません。さらに端末姿勢からスマホの相対ヨーを独立に取得し、スマホを左右へ回したために生じた見かけの顔移動だけを除き、ガラスの奥の世界を逆向きに変換します。実際に顔を上下左右へ動かした成分は残ります。重力とヨーはいずれも軽く平滑化し、微小な角度揺れだけを無視します。絶対方位（北）は使いません。18°の上限は前後傾斜・ロールで未撮影の端が露出するのを防ぐためです。**Recenter** で顔・重力・ヨーの基準を取り直せます。
 
-**Reverse tracking** は、頭を動かしたとき視点がどちらへ動くかを反転します。前面カメラの向きを逆に報告する端末のためのもので、記憶されます。
+**Reverse tracking** は端末ごとの前面カメラの水平軸を合わせる校正です。実際に頭を動かして正しく見える側（確認した端末では ON）のまま使ってください。スマホ自体の左右旋回は別に処理されるため、この設定を切り替えません。設定は記憶されます。
 
-**ピンチ**は画面に入るフレームの量を決めます。広げると寄ります — 小さい画面に残された唯一のつまみです。写真全体が実物大に見える距離はかなり近く、レンズによって変わります（いま見ているシーンの値は表示に出ます）。切り取ることでそれを腕の長さに寄せられます。代償は端が失われることです。狭めると引きます。画面より横長の写真を全部見るにはこちらで、形が合わないときはページが自動でその状態から開きます。交換比はステータス行に常時出ます。**Reset view** で戻ります。
+**ピンチ**の意味はモードで分かれます。**True window** がオンなら、スマホのガラスを同じ物理開口のまま保ち、奥のミニチュアだけを一様に拡大縮小します。オフなら元画像のフレームを寄り引きし、写真整合モードで端の情報量と見かけの大きさを交換します。モード切替時には値を1へ戻すため、切り取り倍率が物理スケールとして持ち越されることはありません。**Reset view** でも1へ戻ります。
 
 **Lens** は、写真がレンズを記録していなかったときだけ出ます。その場合 `ml-sharp` は 30 mm と仮定しますが、これは大きさだけでなく**形**を決めます — 実測した1枚では、被写体が 30 mm で 2.5 m、85 mm で 6.9 m の位置に置かれ、奥行きもそれに応じて伸びました。85 mm で撮ったポートレートを 30 mm で組むと、**平たく潰れます**。
 
@@ -300,11 +300,11 @@ StereoSplatViewer は、外部の `ml-sharp` を使って単一の写真から 3
 
 レンズはシーンを見るまで判断できないので、欄は生成後も残ります。別の数値を入れて **Rebuild** を押せば作り直します。`ml-sharp` を回し直すので、初回と同じくらいの時間がかかります。**押したときだけ**走り、勝手に再生成されることはありません。レンズを記録していた写真では一度も聞きません。360 のシーンは6つの復元を合成したものなので、この方法では作り直せません。
 
-**True window** は、絵をどこから描くかを決めます。オンなら**実際のあなたの目の位置**から描きます。端末を傾けても形が崩れず、ガラスの先は奥へ行くほど切り取られます — 本物の窓がそうであるように。オフなら写真全体がどの奥行きでも画面に収まりますが、代わりに端に近いほど形が伸びます。既定はオンです。
+**True window** は、絵をどこから描くかを決めます。オンなら**実際のあなたの目の位置**から固定された物理開口を通して描きます。端末を傾けても形が崩れず、ガラスの先は奥へ行くほど切り取られます — 本物の窓がそうであるように。PLY に撮影内部パラメータがあればそれを使い、無い場合だけ splat の角度分布から推定します。オフなら写真全体がどの奥行きでも画面に収まりますが、代わりに端に近いほど形が伸びます。既定はオンです。
 
 **Depth** はミニチュアをガラスの奥へ、段階的に滑らせます。どれだけ奥に座るかと、指で回したときにどれだけ大きく振れるかが決まります。手前寄りの値ほど振れが小さくなります。立体感のつまみではありません — シーン全体を遠ざけると、深くなるのではなく平たくなります。
 
-**ダブルタップ**でボタンと表示が消え、もう一度で戻ります。**表示をタップ**すると幾何が使っている数値が出ます。何かおかしいときはここを見てください。
+**ダブルタップ**でボタンと表示が消え、もう一度で戻ります。**表示をタップ**すると幾何が使っている数値が出ます。詳細表示には、発光しているパネル長辺の実測 mm も入力できます。表示が `estimated` の未知端末でスケールがおかしい場合に使ってください。保存した実測値が端末密度の推定より優先されます。
 
 ## クイックスタート
 

@@ -73,6 +73,32 @@ export function estimateCaptureAspect(
   return Number.isFinite(aspect) && aspect > 0 ? aspect : null;
 }
 
+/**
+ * A quantile of camera-axis depth, independent of lateral position.
+ *
+ * This is the distance relevant to a physical screen plane. Euclidean radius
+ * is useful for orbit framing, but it makes an off-axis splat appear deeper
+ * merely because its x/y coordinate is large. Using that radius as the glass
+ * anchor can consequently put the actual nearest surface in front of the
+ * glass, where its perspective expands very quickly.
+ */
+export function estimateDepthQuantile(
+  centers: Float32Array | undefined,
+  { stride = 64, quantile = 0.5 }: { stride?: number; quantile?: number } = {},
+): number | null {
+  if (!centers || centers.length < 3) return null;
+  const depths: number[] = [];
+  const safeStride = Math.max(1, Math.floor(Number.isFinite(stride) ? stride : 64));
+  for (let i = 0; i + 2 < centers.length; i += 3 * safeStride) {
+    const depth = Math.abs(centers[i + 2]);
+    if (Number.isFinite(depth) && depth > 1e-3) depths.push(depth);
+  }
+  if (depths.length === 0) return null;
+  depths.sort((a, b) => a - b);
+  const q = Math.min(Math.max(Number.isFinite(quantile) ? quantile : 0.5, 0), 1);
+  return depths[Math.min(depths.length - 1, Math.floor(depths.length * q))];
+}
+
 export type WindowPlacement = {
   /** Uniform scale applied to the scene. */
   scale: number;
@@ -256,17 +282,16 @@ export function lifeSizeViewingDistance(captureTangent: number): number {
 }
 
 /**
- * Place a metric scene behind the window.
+ * Place a metric scene for the source-photo-preserving mode.
  *
  * The rule is one line: **put the capture camera where the viewer's eye is.**
  * Two cones with different apexes diverge with distance, so any gap between
  * them shows up as the far field being the wrong size -- correct at the
  * subject and worse the further back you look.
  *
- * The window is then `eyeDistance * captureTangent` tall on each side, which is
- * whatever the photograph's own field of view fills. That is a choice: showing
- * the whole frame, rather than the crop a screen-sized window would give at an
- * ordinary viewing distance.
+ * The virtual window is then adjusted by `zoom` to preserve or crop the source
+ * frame. It may be larger or smaller than the physical glass; that is why this
+ * function must not be used by True Window mode.
  *
  * A consequence worth understanding: at the apex the picture is the photograph
  * *whatever the scale is*, because scaling moves every point along its own line
@@ -321,13 +346,51 @@ export function computeWindowPlacement({
   return {
     scale,
     translation: { x: 0, y: 0, z: apex },
-    // Which comes out as exactly the physical screen, one unit on each side:
-    // apex * captureTangent is (1/t) * t. The construction closes on itself,
-    // and head movement is no longer silently rescaled.
+    // At crop one this equals the physical screen. Other crop values are an
+    // intentional virtual-frame scale used only by photo mode.
     windowHalfHeight: 1 / crop,
     anchorDepth: apex - scale * anchorDistance,
     /** The fraction of the original frame still visible. */
     visibleFraction: 1 / crop,
+  };
+}
+
+/**
+ * Place a uniformly scaled miniature behind a literal physical window.
+ *
+ * Unlike `computeWindowPlacement`, this never changes the window aperture.
+ * `modelScale` scales both the reconstruction and the position of its capture
+ * viewpoint, leaving the selected near-depth anchor on the glass. The user's
+ * tracked eye and the screen therefore remain in one fixed physical coordinate
+ * system while pinch still provides a useful miniature-size control.
+ */
+export function computeTrueWindowPlacement({
+  captureTangent,
+  anchorDistance,
+  modelScale = 1,
+}: {
+  captureTangent: number;
+  anchorDistance: number;
+  modelScale?: number;
+}): WindowPlacement {
+  if (!(captureTangent > 0) || !Number.isFinite(captureTangent)) {
+    throw new Error('captureTangent must be a positive, finite number.');
+  }
+  if (!(anchorDistance > 0) || !Number.isFinite(anchorDistance)) {
+    throw new Error('anchorDistance must be a positive, finite number.');
+  }
+  const size = Math.min(
+    Math.max(Number.isFinite(modelScale) && modelScale > 0 ? modelScale : 1, MIN_DEPTH_SCALE),
+    MAX_DEPTH_SCALE,
+  );
+  const scaledApex = apexDistance(captureTangent) * size;
+  const scale = scaledApex / anchorDistance;
+  return {
+    scale,
+    translation: { x: 0, y: 0, z: scaledApex },
+    windowHalfHeight: 1,
+    anchorDepth: scaledApex - scale * anchorDistance,
+    visibleFraction: 1,
   };
 }
 

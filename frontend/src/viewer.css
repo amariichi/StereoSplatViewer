@@ -129,17 +129,17 @@ html, body, #root {
   .window-viewer__spinner { animation-duration: 2600ms; }
 }
 
-/* The lens, shown only when the photograph did not record its own. It sits in
-   the same bar as the buttons and is sized for a two or three digit number, so
-   it reads as one control beside them rather than a form dropped into a row of
-   buttons. */
-.window-viewer__lens {
+/* Compact numeric controls in the same bar as the buttons, so they read as one
+   control beside them rather than as forms dropped into the row. */
+.window-viewer__lens,
+.window-viewer__calibration {
   display: inline-flex;
   gap: 6px;
   align-items: center;
 }
 
-.window-viewer__lens input {
+.window-viewer__lens input,
+.window-viewer__calibration input {
   width: 5.5em;
   padding: 8px 10px;
   border-radius: 8px;
@@ -153,7 +153,12 @@ html, body, #root {
   font-variant-numeric: tabular-nums;
 }
 
-.window-viewer__lens input::placeholder {
+.window-viewer__calibration input {
+  width: 9em;
+}
+
+.window-viewer__lens input::placeholder,
+.window-viewer__calibration input::placeholder {
   color: rgba(255, 255, 255, 0.4);
 }
 

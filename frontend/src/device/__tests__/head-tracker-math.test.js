@@ -25,12 +25,13 @@ import {
   FACE_LANDMARKER_MODEL_URL,
   HeadTracker,
   MEDIAPIPE_TASKS_VERSION,
+  CANONICAL_CYCLOPEAN_EYE_CM,
   averageObservations,
   computeEyeObservation,
   createEyeCalibration,
   createPoseFilter,
   FACE_LANDMARKER_DELEGATES,
-  extractMetricHeadTranslation,
+  extractMetricEyePosition,
   mapMetricPoseToEyePose,
   preferredDelegates,
   mapObservationToEyePose,
@@ -174,6 +175,18 @@ test('time-based pose filter uses different XY and Z response constants', () => 
 });
 
 
+test('tracker geometry changes preserve the filtered eye in millimetres', () => {
+  const tracker = new HeadTracker({ video: {}, worldUnitMm: 60, baselineEyeZ: 5 });
+  tracker.filter.reset({ x: 0.5, y: -0.25, z: 5, confidence: 1, timestamp: 100 }, 100);
+  tracker.setViewingGeometry({ worldUnitMm: 90, baselineEyeZ: 10 / 3 });
+  const pose = tracker.filter.get();
+  assert.ok(Math.abs(pose.x * 90 - 0.5 * 60) < 1e-9);
+  assert.ok(Math.abs(pose.y * 90 - -0.25 * 60) < 1e-9);
+  assert.ok(Math.abs(pose.z * 90 - 5 * 60) < 1e-9);
+  assert.equal(tracker.baselineEyeZ, 10 / 3);
+});
+
+
 test('stopping a tracker closes the landmarker and every camera track', async () => {
   let stopped = 0;
   let closed = 0;
@@ -246,24 +259,43 @@ test('tracker metrics expose actual camera size and time to first stable pose', 
 });
 
 
-test('metric head translation is read from the facial transformation matrix', () => {
-  // Column-major 4x4; the translation column holds centimetres in camera space
-  // with -z pointing away from the camera.
+test('metric eye position transforms the canonical eye through the facial matrix', () => {
+  // Column-major 4x4; the translation is the canonical face origin, while the
+  // point required by the projection is the cyclopean eye several centimetres
+  // forward and above it.
   const matrix = new Float32Array(16);
   matrix[0] = 1; matrix[5] = 1; matrix[10] = 1; matrix[15] = 1;
   matrix[12] = 3.5;
   matrix[13] = -1.25;
   matrix[14] = -34;
-  const metric = extractMetricHeadTranslation({ data: matrix });
+  const metric = extractMetricEyePosition({ data: matrix });
   assert.ok(Math.abs(metric.xMm - 35) < 1e-6);
-  assert.ok(Math.abs(metric.yMm + 12.5) < 1e-6);
-  assert.ok(Math.abs(metric.distanceMm - 340) < 1e-6);
+  assert.ok(Math.abs(metric.yMm - (-1.25 + CANONICAL_CYCLOPEAN_EYE_CM.y) * 10) < 1e-5);
+  assert.ok(Math.abs(metric.distanceMm
+    - Math.abs(-34 + CANONICAL_CYCLOPEAN_EYE_CM.z) * 10) < 1e-5);
 
-  assert.equal(extractMetricHeadTranslation(null), null);
-  assert.equal(extractMetricHeadTranslation({ data: new Float32Array(9) }), null);
+  // A 90-degree yaw turns the canonical eye's forward offset into X. Reading
+  // only the translation column would miss this orientation-dependent shift.
+  const yawed = new Float32Array(16);
+  yawed[2] = -1;
+  yawed[5] = 1;
+  yawed[8] = 1;
+  yawed[12] = 3.5;
+  yawed[13] = -1.25;
+  yawed[14] = -34;
+  yawed[15] = 1;
+  const rotated = extractMetricEyePosition(yawed);
+  assert.ok(Math.abs(rotated.xMm
+    - (3.5 + CANONICAL_CYCLOPEAN_EYE_CM.z) * 10) < 1e-5);
+  assert.ok(Math.abs(rotated.yMm
+    - (-1.25 + CANONICAL_CYCLOPEAN_EYE_CM.y) * 10) < 1e-5);
+  assert.ok(Math.abs(rotated.distanceMm - 340) < 1e-5);
+
+  assert.equal(extractMetricEyePosition(null), null);
+  assert.equal(extractMetricEyePosition({ data: new Float32Array(9) }), null);
   const tooClose = new Float32Array(16);
   tooClose[14] = 0;
-  assert.equal(extractMetricHeadTranslation({ data: tooClose }), null);
+  assert.equal(extractMetricEyePosition({ data: tooClose }), null);
 });
 
 

@@ -4,8 +4,10 @@ import {
   MAX_DEPTH_SCALE,
   MIN_DEPTH_SCALE,
   computeWindowPlacement,
+  computeTrueWindowPlacement,
   estimateCaptureAspect,
   estimateCaptureTangent,
+  estimateDepthQuantile,
   findFarFieldCut,
   MAX_ZOOM,
   MIN_ZOOM,
@@ -106,6 +108,60 @@ describe('placing the scene behind the window', () => {
     expect(() => computeWindowPlacement({ ...options, anchorDistance: 0 })).toThrow();
     expect(() => computeWindowPlacement({ ...options, captureTangent: 0 })).toThrow();
     expect(() => apexDistance(0)).toThrow();
+  });
+});
+
+describe('placing a physical miniature behind a literal window', () => {
+  it('keeps the aperture equal to the physical screen at every model size', () => {
+    for (const modelScale of [0.3, 1, 3]) {
+      const p = computeTrueWindowPlacement({ ...options, modelScale });
+      expect(p.windowHalfHeight).toBe(1);
+    }
+  });
+
+  it('keeps the selected near-depth anchor on the glass at every model size', () => {
+    for (const modelScale of [0.3, 1, 3]) {
+      const p = computeTrueWindowPlacement({ ...options, modelScale });
+      expect(p.anchorDepth).toBeCloseTo(0, 12);
+      expect(p.translation.z - p.scale * options.anchorDistance).toBeCloseTo(0, 12);
+    }
+  });
+
+  it('uniformly scales both the miniature and its capture viewpoint', () => {
+    const small = computeTrueWindowPlacement({ ...options, modelScale: 0.5 });
+    const large = computeTrueWindowPlacement({ ...options, modelScale: 2 });
+    expect(large.scale / small.scale).toBeCloseTo(4, 12);
+    expect(large.translation.z / small.translation.z).toBeCloseTo(4, 12);
+  });
+
+  it('clamps invalid or extreme model sizes without changing the aperture', () => {
+    const fallback = computeTrueWindowPlacement({ ...options, modelScale: Number.NaN });
+    const tiny = computeTrueWindowPlacement({ ...options, modelScale: 1e-9 });
+    const huge = computeTrueWindowPlacement({ ...options, modelScale: 1e9 });
+    expect(fallback.windowHalfHeight).toBe(1);
+    expect(tiny.scale).toBeCloseTo((apex / options.anchorDistance) * MIN_DEPTH_SCALE, 12);
+    expect(huge.scale).toBeCloseTo((apex / options.anchorDistance) * MAX_DEPTH_SCALE, 12);
+  });
+});
+
+describe('measuring optical-axis depth for the glass anchor', () => {
+  it('does not change when a splat moves sideways at the same z depth', () => {
+    const onAxis = new Float32Array([0, 0, -2, 0, 0, -4]);
+    const offAxis = new Float32Array([100, -80, -2, -70, 90, -4]);
+    expect(estimateDepthQuantile(onAxis, { stride: 1, quantile: 0 })).toBe(2);
+    expect(estimateDepthQuantile(offAxis, { stride: 1, quantile: 0 })).toBe(2);
+  });
+
+  it('ignores zero and non-finite depths and clamps the quantile', () => {
+    const centers = new Float32Array([
+      0, 0, 0,
+      0, 0, Number.NaN,
+      5, 6, -3,
+      8, 9, -7,
+    ]);
+    expect(estimateDepthQuantile(centers, { stride: 1, quantile: -2 })).toBe(3);
+    expect(estimateDepthQuantile(centers, { stride: 1, quantile: 5 })).toBe(7);
+    expect(estimateDepthQuantile(new Float32Array([1, 2, 0]), { stride: 1 })).toBe(null);
   });
 });
 

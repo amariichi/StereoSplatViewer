@@ -20,9 +20,12 @@
 // as the roll-only version it replaces was.
 
 export type Vec3 = { x: number; y: number; z: number };
+export type Quaternion = { x: number; y: number; z: number; w: number };
 
-/** Half of the device's turn is given back, which was arrived at on hardware. */
+/** Photo mode's deliberately partial response. */
 export const DEFAULT_LEVELLING_GAIN = 0.5;
+/** True Window uses the measured pitch/roll without scaling. */
+export const TRUE_WINDOW_LEVELLING_GAIN = 1;
 export const MAX_LEVELLING_RAD = (18 * Math.PI) / 180;
 
 /** Below this the reading is hand movement rather than gravity. */
@@ -30,7 +33,7 @@ const MIN_GRAVITY = 2;
 
 export type AxisAngle = { axis: Vec3; angle: number };
 
-/** The two turns, kept apart because they need opposite signs. */
+/** The filtered phone attitude relative to the posture captured at start. */
 export type Levelling = {
   /** About the view axis: the device rolled left or right. */
   roll: number;
@@ -57,24 +60,22 @@ function damp(angle: number, gain: number, limit: number): number {
 }
 
 /**
- * How far to turn the scene, split into the two turns a hand actually makes.
+ * How far the phone moved from its reference posture on gravity's two axes.
  *
- * They are kept apart because they want opposite signs, which is not something
- * that could be reasoned to and was established by holding a device:
+ * They stay separate because the scene needs a different mapping for each mode:
  *
- *  - **Rolling** the device left or right should always turn the scene *back*.
- *    There is no reason to want the scene to lean further than the device does;
- *    anyone who wants a leaning picture can turn the correction off and tilt
- *    the device as far as they like.
- *  - **Tipping** it towards or away should stand the model up, which is the
- *    opposite sense.
+ *  - **Roll** is measured from model-up to the gravity-derived world-up in the
+ *    phone's screen plane. Applying it directly keeps the model level.
+ *  - **Tip** says how far the screen turned toward the ceiling. True Window
+ *    applies its inverse to the model; photo mode leaves it to the tracked eye.
  *
  * Both are measured from the posture levelling began in, not from vertical: a
  * tablet is read tipped well back, and measuring from vertical put the
  * correction at its cap before anyone had moved.
  *
- * Both are halved and capped, because the scene is a photograph with edges and
- * turning it all the way back swings its corners into view.
+ * Both measurements are scaled and capped before the mode mapping, because the
+ * scene is a photograph with edges and turning it too far exposes missing data.
+ * True Window uses a gain of one while photo mode retains half-strength roll.
  */
 export function computeLevelling(
   gravity: Partial<Vec3> | null | undefined,
@@ -82,7 +83,11 @@ export function computeLevelling(
     reference = null,
     gain = DEFAULT_LEVELLING_GAIN,
     maxAngle = MAX_LEVELLING_RAD,
-  }: { reference?: Vec3 | null; gain?: number; maxAngle?: number } = {},
+  }: {
+    reference?: Vec3 | null;
+    gain?: number;
+    maxAngle?: number;
+  } = {},
 ): Levelling | null {
   const up = upInDeviceFrame(gravity);
   if (!up) return null;
@@ -110,13 +115,13 @@ export function computeLevelling(
 }
 
 /**
- * The two turns as one quaternion, tip first and then roll.
+ * The two attitude components as one quaternion, tip first and then roll.
  *
  * The order matters only at large angles, and both are capped at eighteen
  * degrees, so it is chosen for the reading it gives rather than forced: the
- * scene is stood up, then levelled.
+ * the axes are composed consistently.
  */
-export function toQuaternion({ roll, tip }: Levelling): { x: number; y: number; z: number; w: number } {
+export function toQuaternion({ roll, tip }: Levelling): Quaternion {
   const hx = tip / 2;
   const hz = roll / 2;
   const sx = Math.sin(hx), cx = Math.cos(hx);
@@ -128,4 +133,117 @@ export function toQuaternion({ roll, tip }: Levelling): { x: number; y: number; 
     z: sz * cx,
     w: cz * cx,
   };
+}
+
+/** Rotate a vector by a quaternion, accepting small normalisation drift. */
+export function rotateVectorByQuaternion(vector: Vec3, rotation: Quaternion): Vec3 {
+  if (![vector?.x, vector?.y, vector?.z].every(Number.isFinite)) return { ...vector };
+  const magnitude = Math.hypot(rotation?.x, rotation?.y, rotation?.z, rotation?.w);
+  if (!(magnitude > 1e-9) || !Number.isFinite(magnitude)) return { ...vector };
+  const x = rotation.x / magnitude;
+  const y = rotation.y / magnitude;
+  const z = rotation.z / magnitude;
+  const w = rotation.w / magnitude;
+
+  // q * v * conjugate(q), written as two cross products to avoid temporary
+  // quaternion allocations on every motion/head-tracking update.
+  const tx = 2 * (y * vector.z - z * vector.y);
+  const ty = 2 * (z * vector.x - x * vector.z);
+  const tz = 2 * (x * vector.y - y * vector.x);
+  return {
+    x: vector.x + w * tx + (y * tz - z * ty),
+    y: vector.y + w * ty + (z * tx - x * tz),
+    z: vector.z + w * tz + (x * ty - y * tx),
+  };
+}
+
+/** The unit inverse of a rotation quaternion, or null for unusable input. */
+export function inverseRotation(
+  rotation: Quaternion | null | undefined,
+): Quaternion | null {
+  if (!rotation) return null;
+  const magnitude = Math.hypot(rotation.x, rotation.y, rotation.z, rotation.w);
+  if (!(magnitude > 1e-9) || !Number.isFinite(magnitude)) return null;
+  return {
+    x: -rotation.x / magnitude,
+    y: -rotation.y / magnitude,
+    z: -rotation.z / magnitude,
+    w: rotation.w / magnitude,
+  };
+}
+
+/**
+ * Turn the model with the per-axis signs each viewing mode needs.
+ *
+ * `attitude` is `qz(roll) * qx(tip)`. In True Window the model must follow the
+ * measured roll so its up axis agrees with gravity, but use the opposite tip so
+ * looking over/under the phone agrees with the unassisted head-tracked view.
+ * Negating x and y changes only `tip` for this composition. Photo mode keeps
+ * the roll stabiliser but leaves pitch entirely to the tracked eye; otherwise
+ * its half-strength model turn cancels that camera movement.
+ */
+export function sceneRotationForMode(
+  attitude: Quaternion | null | undefined,
+  { trueWindow }: { trueWindow: boolean },
+): Quaternion | null {
+  if (!attitude) return null;
+  const magnitude = Math.hypot(attitude.x, attitude.y, attitude.z, attitude.w);
+  if (!(magnitude > 1e-9) || !Number.isFinite(magnitude)) return null;
+  const q = {
+    x: attitude.x / magnitude,
+    y: attitude.y / magnitude,
+    z: attitude.z / magnitude,
+    w: attitude.w / magnitude,
+  };
+  if (trueWindow) return { x: -q.x, y: -q.y, z: q.z, w: q.w };
+
+  // For qz(roll) * qx(tip), atan2(z, w) is roll/2 regardless of tip.
+  const halfRoll = Math.atan2(q.z, q.w);
+  const z = Math.sin(halfRoll);
+  if (Math.abs(z) < 1e-9) return null;
+  return { x: 0, y: 0, z, w: Math.cos(halfRoll) };
+}
+
+/**
+ * Express a camera-reported eye in the posture captured by Hold level.
+ *
+ * A phone pitch rotates both the gravity attitude and the metric eye reported
+ * in camera coordinates. Applying the attitude to the scene while using that
+ * raw eye made the two visual changes cancel at rest. Counter-rotating the eye
+ * removes only the predictable device-attitude component; real translation of
+ * the observer remains in the returned reference-frame vector.
+ */
+export function counterRotateEye(
+  eye: Vec3,
+  attitude: Quaternion | null | undefined,
+): Vec3 {
+  const inverse = inverseRotation(attitude);
+  return inverse ? rotateVectorByQuaternion(eye, inverse) : { ...eye };
+}
+
+/** A right-handed turn about screen-up, with identity for unusable input. */
+function yawRotation(angle: number): Quaternion {
+  if (!Number.isFinite(angle)) return { x: 0, y: 0, z: 0, w: 1 };
+  const half = angle / 2;
+  return { x: 0, y: Math.sin(half), z: 0, w: Math.cos(half) };
+}
+
+/**
+ * Express a camera-frame eye in the heading reference captured by Hold level.
+ *
+ * Turning the phone by `yaw` makes a fixed observer appear through the inverse
+ * turn in camera coordinates. Applying the device-to-reference turn removes
+ * that phone motion. A real translation is carried through the rotation rather
+ * than negated, so Reverse tracking remains solely the front-camera axis
+ * calibration it was meant to be.
+ */
+export function eyeInYawReferenceFrame(eye: Vec3, yaw: number): Vec3 {
+  return Number.isFinite(yaw)
+    ? rotateVectorByQuaternion(eye, yawRotation(yaw))
+    : { ...eye };
+}
+
+/** A stationary world behind the glass, expressed in the turned phone frame. */
+export function sceneYawForDevice(yaw: number): Quaternion {
+  return yawRotation(-yaw);
 }
