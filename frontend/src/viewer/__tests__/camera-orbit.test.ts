@@ -10,8 +10,10 @@ import {
   cameraForward,
   cameraRight,
   cameraUp,
+  MAX_ORBIT_MAGNIFICATION,
   createOrbitState,
   orbitChanged,
+  orbitPivotDistance,
   orbitToPosition,
 } from '../camera-orbit';
 
@@ -148,5 +150,48 @@ describe('deciding whether to redraw', () => {
     const far = createOrbitState({ distance: 500 });
     expect(orbitChanged(near, { ...near, distance: 0.5 + 0.01 })).toBe(true);
     expect(orbitChanged(far, { ...far, distance: 500 + 0.01 })).toBe(false);
+  });
+});
+
+
+describe('choosing what to orbit', () => {
+  // Measured from one held scene: 1,179,648 gaussians, nearest 1.20 units,
+  // median 57.83. The numbers are kept rather than rounded because they are
+  // what the bound exists for.
+  const MEASURED_NEAREST = 1.20;
+  const MEASURED_MEDIAN = 57.83;
+
+  it('bounds a photograph whose background fills most of the frame', () => {
+    const pivot = orbitPivotDistance(MEASURED_MEDIAN, MEASURED_NEAREST);
+    expect(pivot).toBeCloseTo(MEASURED_NEAREST * MAX_ORBIT_MAGNIFICATION, 9);
+    // Which is the whole point: a drag magnified forty-eight times at the
+    // subject is magnified four times instead.
+    expect(MEASURED_MEDIAN / MEASURED_NEAREST).toBeGreaterThan(45);
+    expect(pivot / MEASURED_NEAREST).toBeCloseTo(MAX_ORBIT_MAGNIFICATION, 9);
+  });
+
+  it('leaves a scene alone when the subject fills it', () => {
+    // Nearest 1.2, median 3.6: the subject is the scene, and three is already
+    // inside the bound.
+    expect(orbitPivotDistance(3.6, 1.2)).toBeCloseTo(3.6, 9);
+  });
+
+  it('leaves a scene alone when everything in it is distant', () => {
+    // A landscape with nothing near: the ratio is what matters, not the
+    // distance, and orbiting eighty units away is comfortable when the nearest
+    // thing is fifty.
+    expect(orbitPivotDistance(80, 50)).toBeCloseTo(80, 9);
+  });
+
+  it('never moves the pivot further away than the median', () => {
+    for (const [median, nearest] of [[3, 1], [10, 4], [57.83, 1.2], [80, 50]]) {
+      expect(orbitPivotDistance(median, nearest)).toBeLessThanOrEqual(median);
+    }
+  });
+
+  it('keeps the median when there is no usable nearest distance', () => {
+    for (const nearest of [null, 0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(orbitPivotDistance(12, nearest)).toBe(12);
+    }
   });
 });
