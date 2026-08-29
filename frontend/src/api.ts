@@ -69,6 +69,42 @@ export async function uploadFile(
   return res.json();
 }
 
+/**
+ * Build the scene the server is holding again, through a different lens.
+ *
+ * The source photograph is still in the job directory, so this needs only the
+ * number: no second upload, and the scene keeps its job id rather than becoming
+ * a new one. Worth having because the lens cannot be judged before the scene
+ * exists -- a photograph recording none is unprojected through SHARP's 30 mm
+ * default, and if that is wrong the depth is wrong with it, visibly. The only
+ * way to find the right one is to try it and look.
+ */
+export async function rebuildWithLens(
+  jobId: string,
+  focalLength35mm: number,
+): Promise<{ jobId: string; focalUsed: number; statusUrl: string }> {
+  const formData = new FormData();
+  formData.append("focal_length_35mm", String(focalLength35mm));
+  const res = await fetch(`${API_BASE}/api/scene/${jobId}/relens`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) {
+    // The refusals are specific and worth repeating rather than reducing to a
+    // number: a 360 is six reconstructions and cannot be rebuilt as one image,
+    // a build already running must not be raced, and a job whose photograph is
+    // gone cannot be rebuilt at all.
+    const detail = await res
+      .json()
+      .then((body) => body?.detail)
+      .catch(() => null);
+    throw new Error(
+      typeof detail === "string" ? detail : `The server answered ${res.status}`,
+    );
+  }
+  return res.json();
+}
+
 export async function fetchStatus(statusUrl: string): Promise<JobStatus> {
   const res = await fetch(`${API_BASE}${statusUrl}`);
   if (!res.ok) {
