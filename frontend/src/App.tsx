@@ -6,6 +6,7 @@ import {
   fetchLogs,
   fetchMetadata,
   fetchStatus,
+  rebuildWithLens,
   resolveAssetUrl,
   uploadFile,
 } from "./api";
@@ -58,6 +59,7 @@ function App() {
   const [logs, setLogs] = useState<{ stdout: string; stderr: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [isRebuilding, setIsRebuilding] = useState(false);
   // ml-sharp reads the lens from EXIF and falls back to 30 mm. That assumption
   // decides the field of view the scene is unprojected through, and so both its
   // shape and the distance it can comfortably be viewed from. Left empty, the
@@ -340,6 +342,56 @@ function App() {
     setError(null);
   };
 
+  /**
+   * Build the held photograph again through the lens in the field beside it.
+   *
+   * Deliberately not the Generate button. That one needs a file, clears the
+   * data root and starts a different job; this one takes no file, keeps the job
+   * id and replaces the scene in place. Folding them together would have made a
+   * destructive action and a repeatable one depend on whether a file happened
+   * to be chosen at the time.
+   */
+  const handleRebuildWithLens = async () => {
+    const jobId = job?.jobId ?? heldScene?.jobId;
+    if (!jobId || !focalLength35mm || isRebuilding) return;
+    setIsRebuilding(true);
+    setError(null);
+    setLogs(null);
+    try {
+      const started = await rebuildWithLens(jobId, focalLength35mm);
+      // Watched here rather than through the job poller, which drives the
+      // preview: the scene already on screen is the one being replaced, and
+      // blanking it for the minutes a build takes would remove the only thing
+      // there is to compare the new lens against.
+      const deadline = Date.now() + 10 * 60 * 1000;
+      for (;;) {
+        if (Date.now() > deadline) throw new Error("The scene took too long to build.");
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        const next = await fetchStatus(started.statusUrl);
+        if (next.status === "done") break;
+        if (next.status === "error") throw new Error(next.message || "The backend failed.");
+      }
+      // A rebuild is a new revision at a new address. The bytes are served as
+      // immutable for a year, so reopening the old URL would show the old
+      // picture; the server's own answer carries the stamped one.
+      const scene = await fetchLatestScene();
+      if (!scene) throw new Error("The scene was built but the server no longer offers it.");
+      setHeldScene(scene);
+      setJob({
+        jobId: scene.jobId,
+        plyUrl: scene.plyUrl,
+        statusUrl: `/api/scene/${scene.jobId}/status`,
+        logsUrl: `/api/scene/${scene.jobId}/logs`,
+        metaUrl: `/api/scene/${scene.jobId}/metadata.json`,
+      });
+      setStatus({ status: "done", message: `built at ${started.focalUsed.toFixed(0)} mm` });
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setIsRebuilding(false);
+    }
+  };
+
   const handleRemoveHeldScene = async () => {
     // Two clicks rather than a dialog. The scene took minutes of GPU time to
     // make and there is no undo, so a single stray click should not end it.
@@ -555,10 +607,32 @@ function App() {
                     }}
                   />
                 </label>
-                <button type="submit" className="btn btn--primary" disabled={!file || isUploading}>
+                <button
+                  type="submit"
+                  className="btn btn--primary"
+                  disabled={!file || isUploading || isRebuilding}
+                >
                   {isUploading ? "Uploading…" : "Generate"}
                 </button>
               </div>
+              {(job?.jobId ?? heldScene?.jobId) && (
+                <div className="relens">
+                  <button
+                    type="button"
+                    className="btn btn--ghost"
+                    disabled={!focalLength35mm || isRebuilding || isUploading}
+                    onClick={handleRebuildWithLens}
+                  >
+                    {isRebuilding ? "Rebuilding…" : "Rebuild at this lens"}
+                  </button>
+                  <em>
+                    Builds the photograph the server is already holding again,
+                    through the lens above. Nothing is uploaded a second time and
+                    the scene keeps its place, so this can be tried as often as it
+                    takes to find the right one. A 360 cannot be rebuilt this way.
+                  </em>
+                </div>
+              )}
             </form>
             <details className="tucked">
               <summary>Open a .ply from this machine</summary>

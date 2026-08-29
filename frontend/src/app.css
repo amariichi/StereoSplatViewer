@@ -276,6 +276,23 @@ input[type="range"] {
   height: 2.1rem;
 }
 
+.relens {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
+.relens .btn {
+  align-self: start;
+}
+
+.relens em {
+  font-style: normal;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+
 .tucked {
   font-size: 0.8rem;
   color: var(--text-dim);

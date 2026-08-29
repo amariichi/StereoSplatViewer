@@ -33,6 +33,7 @@ import {
   applyPan,
   createOrbitState,
   orbitChanged,
+  orbitPivotDistance,
   orbitToPosition,
 } from './camera-orbit';
 
@@ -1021,7 +1022,8 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
     const resource = splat?.gsplat?.resource;
     const centers = resource?.hasCenters ? resource.centers : undefined;
     const distance = splatDistanceQuantile(centers, 0.5) ?? DEFAULT_SUBJECT_DISTANCE;
-    anchorDistanceRef.current = nearSplatDistance(centers) ?? distance;
+    const nearest = nearSplatDistance(centers);
+    anchorDistanceRef.current = nearest ?? distance;
 
     const hintedTangent = captureTangentHintRef.current;
     captureTangentRef.current = typeof hintedTangent === 'number'
@@ -1042,10 +1044,15 @@ export const SplatViewer = forwardRef<ViewerHandle, Props>(function SplatViewer(
       return;
     }
 
+    // Not the median itself: a background filling most of the frame drags that
+    // out to the horizon, and the camera then swings on a radius many times the
+    // distance to the subject. In stereo this matters twice over, because pivot
+    // mode puts the plane of the screen at the same distance.
+    const pivot = orbitPivotDistance(distance, nearest);
     orbitRef.current = createOrbitState({
-      distance,
+      distance: pivot,
       // Straight ahead of the capture viewpoint, which is the origin.
-      target: { x: 0, y: 0, z: -distance },
+      target: { x: 0, y: 0, z: -pivot },
     });
     drawnRef.current = null;
   }

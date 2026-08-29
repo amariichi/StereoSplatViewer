@@ -65,6 +65,8 @@ It also decides how the result can be looked at. A scene keeps the field of view
 
 Eleven centimetres is no way to hold a phone. If your image has no EXIF, put the lens in the **Lens (35 mm equiv.)** field before uploading — an ordinary portrait is 50 to 85 mm — and the scene will be both correctly shaped and comfortable to view at arm's length.
 
+The right lens cannot be judged before the scene exists, so guessing once is not enough. **Rebuild at this lens**, under the same field, builds the photograph the server is already holding again through a new number. Nothing is uploaded a second time — the picture is still in the job directory — and the scene keeps its place, so this can be tried as often as it takes. It is offered for any held scene, including one whose EXIF recorded a lens, because a photograph can record one and record it wrongly. A 360 is six reconstructions merged and cannot be rebuilt this way.
+
 ## The viewer page
 
 Alongside the editor there is a second page, `/viewer.html`, meant for a phone. It uses the front camera to find where your head is and draws the scene from that point of view, so the screen behaves like a window onto a miniature standing just behind the glass. Moving your head reveals the shape.
@@ -261,6 +263,8 @@ StereoSplatViewer は、外部の `ml-sharp` を使って単一の写真から 3
     85 mm                  313 mm
 
 11センチはスマートフォンの持ち方ではありません。EXIF の無い画像なら、アップロード前に **Lens (35 mm equiv.)** 欄にレンズを入れてください（普通のポートレートなら 50〜85mm）。形が正しくなり、腕の長さで無理なく見られるようになります。
+
+正しいレンズはシーンが出来る前には判断できないので、一度の当て推量では足りません。同じ欄の下にある **Rebuild at this lens** は、サーバが保持している写真を新しい数値で建て直します。元画像はジョブのディレクトリに残っているので再アップロードは不要で、シーンの場所も変わりません。納得するまで何度でも試せます。EXIF にレンズが記録されていたシーンにも出ます — 写真はレンズを記録していて、しかもそれが間違っていることがあるからです。360 は6つの再構成を統合したものなので、この方法では建て直せません。
 
 ## ビューアページ
 

@@ -32,6 +32,49 @@ const RADIANS_PER_PIXEL = (Math.PI * 2) / 1000;
 // fixed amount, so that zooming feels the same close up and far away.
 const DOLLY_PER_WHEEL_UNIT = 0.0015;
 
+// How much faster than the drag itself the nearest gaussian may sweep across
+// the frame. The camera swings on a radius of the orbit distance, so a point at
+// the near anchor moves by exactly the ratio between the two. Four puts the
+// pivot around the middle of the nearest object rather than at its front.
+export const MAX_ORBIT_MAGNIFICATION = 4;
+
+/**
+ * How far away to put the point the camera orbits.
+ *
+ * The median gaussian distance is right when the subject fills the frame and
+ * wrong when it does not. A measured photograph with a distant background put
+ * its median at 57.8 units while the nearest splat sat at 1.20: the camera
+ * swung on a radius forty-eight times the distance to the subject, and a ten
+ * pixel drag moved it three times further than the subject was away. The
+ * subject left the frame before the mouse had travelled a centimetre.
+ *
+ * Detecting the subject instead was tried and abandoned. These scenes are not
+ * bimodal but multimodal -- that same photograph has humps at roughly 2, 8, 30
+ * and 60 units -- so there is no single boundary to find, and no empty gap to
+ * find it by: the largest step between adjacent sampled distances across the
+ * middle nine tenths of that scene is 2.5 per cent, which is noise.
+ *
+ * So the pivot is bounded rather than detected. What makes a distant pivot
+ * unusable is not its distance but its ratio to the nearest thing on screen,
+ * because that ratio is the magnification. A scene that is entirely far away is
+ * left alone: everything in it is distant, the ratio is small, and the median
+ * stands.
+ *
+ * `medianDistance` is expected to carry the caller's own fallback already.
+ */
+export function orbitPivotDistance(
+  medianDistance: number,
+  nearestDistance: number | null,
+): number {
+  if (nearestDistance === null
+    || !Number.isFinite(nearestDistance)
+    || nearestDistance <= 0
+    || !Number.isFinite(medianDistance)) {
+    return medianDistance;
+  }
+  return Math.min(medianDistance, nearestDistance * MAX_ORBIT_MAGNIFICATION);
+}
+
 export function createOrbitState(overrides: Partial<OrbitState> = {}): OrbitState {
   return {
     yaw: 0,
