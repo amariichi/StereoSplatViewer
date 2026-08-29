@@ -29,7 +29,11 @@ import {
   resolveScreenMetrics,
   saveStoredNumber,
 } from '../device/device-metrics.js';
-import { createTiltTracker, wrapAngle } from '../device/device-tilt.js';
+import {
+  DEFAULT_ORIENTATION_SETTLE_MS,
+  createTiltTracker,
+  wrapAngle,
+} from '../device/device-tilt.js';
 import {
   TRUE_WINDOW_LEVELLING_GAIN,
   computeLevelling,
@@ -398,6 +402,22 @@ export function WindowViewer() {
       // during its five stable samples.
       trackerRef.current?.recenter();
       eyeRef.current = { ...eyeRef.current, x: 0, y: 0 };
+      // The sensor path is stale for the same reason, and in the same instant:
+      // its filters, deadband baselines and reference attitudes were all
+      // learned in the screen frame that has just been replaced. Hold level
+      // stays on and keeps its granted permissions and its listeners; only
+      // what they measured is discarded, and only until the turn settles.
+      if (tiltRef.current?.running) {
+        tiltRef.current.recenter({ settleMs: DEFAULT_ORIENTATION_SETTLE_MS });
+      }
+      // Until the first settled sample arrives there is no reference to
+      // measure from, so no correction is shown. Publishing the old one for a
+      // quarter of a second would be showing the previous orientation's idea
+      // of upright.
+      levellingRef.current = null;
+      levelReferenceRef.current = null;
+      headingReferenceRef.current = null;
+      deviceYawRef.current = 0;
       portraitRef.current = portrait;
     }
     publishPose();

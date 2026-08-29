@@ -20,6 +20,7 @@ const assert = Object.assign(
 
 
 import {
+  DEFAULT_ORIENTATION_SETTLE_MS,
   DEFAULT_TILT_GAIN,
   MAX_TILT_CORRECTION_RAD,
   clampTiltCorrection,
@@ -339,6 +340,13 @@ test('refused orientation access keeps gravity levelling available', async () =>
   assert.equal(await tracker.start(), 'granted');
   assert.equal(listeners.has('devicemotion'), true);
   assert.equal(listeners.has('deviceorientation'), false);
+
+  // Recentering has to be safe on the gravity-only path as well: there is no
+  // heading subscription to preserve, and none to invent.
+  tracker.recenter({ settleMs: DEFAULT_ORIENTATION_SETTLE_MS });
+  assert.equal(tracker.running, true);
+  assert.equal(listeners.has('devicemotion'), true);
+  assert.equal(listeners.has('deviceorientation'), false);
 });
 
 
@@ -368,3 +376,106 @@ test('platforms without a permission gate report granted', async () => {
     orientationEvent: { requestPermission: async () => { throw new Error('blocked'); } },
   }), 'denied');
 });
+
+
+// Turning the phone while Hold level is on is a different situation from the
+// isolated roll maths above: the filters, deadband baselines, granted
+// permissions and live subscriptions are all still running underneath a screen
+// frame that has just been replaced.
+for (const [from, to, startAngle, endAngle] of [
+  ['portrait', 'landscape', 0, 90],
+  ['landscape', 'portrait', 90, 0],
+]) {
+  test(`recentering ${from} to ${to} drops the old frame and keeps the tracker`, async () => {
+    const listeners = new Map();
+    const target = {
+      addEventListener: (type, handler) => listeners.set(type, handler),
+      removeEventListener: (type) => listeners.delete(type),
+    };
+    const held = (degrees) => ({
+      x: -G * Math.sin((degrees * Math.PI) / 180),
+      y: G * Math.cos((degrees * Math.PI) / 180),
+      z: 0,
+    });
+    const glass = { alpha: 200, beta: 80, gamma: 0 };
+    const screen = { orientation: { angle: startAngle } };
+    let timestamp = 0;
+    let motionRequests = 0;
+    let orientationRequests = 0;
+    const rolls = [];
+    const headings = [];
+    const tracker = createTiltTracker({
+      target,
+      screen,
+      now: () => timestamp,
+      gravityTimeConstantMs: 1000,
+      headingTimeConstantMs: 1000,
+      gravityDeadbandRad: 0,
+      headingDeadbandRad: 0,
+      motionEvent: { requestPermission: async () => { motionRequests += 1; return 'granted'; } },
+      orientationEvent: {
+        requestPermission: async () => { orientationRequests += 1; return 'granted'; },
+      },
+      onRoll: (roll) => rolls.push(roll),
+      onHeading: (heading) => headings.push(heading),
+    });
+
+    assert.equal(await tracker.start(), 'granted');
+    listeners.get('devicemotion')({ accelerationIncludingGravity: held(startAngle + 8) });
+    timestamp = 100;
+    listeners.get('devicemotion')({ accelerationIncludingGravity: held(startAngle + 9) });
+    listeners.get('deviceorientation')({ alpha: 20, beta: 80, gamma: 0 });
+    assert.ok(tracker.getRoll() !== null);
+    assert.ok(tracker.getSmoothedReading() !== null);
+    assert.ok(tracker.getHeading() !== null);
+    assert.ok(rolls.length > 0);
+    assert.ok(headings.length > 0);
+
+    timestamp = 1000;
+    screen.orientation.angle = endAngle;
+    tracker.recenter({ settleMs: DEFAULT_ORIENTATION_SETTLE_MS });
+
+    // Everything measured in the old frame is gone.
+    assert.equal(tracker.getRawRoll(), null);
+    assert.equal(tracker.getReading(), null);
+    assert.equal(tracker.getSmoothedReading(), null);
+    assert.equal(tracker.getRoll(), null);
+    assert.equal(tracker.getRawHeading(), null);
+    assert.equal(tracker.getHeading(), null);
+    // Everything that cost a user gesture is not.
+    assert.equal(tracker.running, true);
+    assert.equal(listeners.has('devicemotion'), true);
+    assert.equal(listeners.has('deviceorientation'), true);
+    assert.equal(motionRequests, 1);
+    assert.equal(orientationRequests, 1);
+
+    // The layout crosses the boundary before the hand finishes turning, so a
+    // sample from the middle of the quarter turn is discarded whole rather
+    // than becoming the new definition of level.
+    const published = rolls.length;
+    const heard = headings.length;
+    timestamp = 1000 + DEFAULT_ORIENTATION_SETTLE_MS - 1;
+    listeners.get('devicemotion')({ accelerationIncludingGravity: held(endAngle + 40) });
+    listeners.get('deviceorientation')(glass);
+    assert.equal(tracker.getReading(), null);
+    assert.equal(tracker.getRoll(), null);
+    assert.equal(tracker.getHeading(), null);
+    assert.equal(rolls.length, published);
+    assert.equal(headings.length, heard);
+
+    // The deadline itself already belongs to the new frame, and its first
+    // sample is read as it stands rather than blended with the filters it
+    // replaced.
+    timestamp = 1000 + DEFAULT_ORIENTATION_SETTLE_MS;
+    const settled = held(endAngle + 3);
+    listeners.get('devicemotion')({ accelerationIncludingGravity: settled });
+    listeners.get('deviceorientation')(glass);
+    assert.equal(rolls.length, published + 1);
+    assert.equal(headings.length, heard + 1);
+    assert.ok(Math.abs(deg(tracker.getRoll()) - 3) < 1e-6);
+    assert.ok(Math.abs(tracker.getSmoothedReading().x - settled.x) < 1e-9);
+    assert.ok(Math.abs(tracker.getSmoothedReading().y - settled.y) < 1e-9);
+    assert.equal(tracker.getSmoothedReading().screenAngle, endAngle);
+    assert.equal(tracker.getHeading(), computeScreenHeading(glass));
+  });
+}

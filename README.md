@@ -77,7 +77,13 @@ It shows whatever the editor last produced, and keeps up with it: make a new sce
 
 Left to find the scene itself, the phone downloads a compressed copy, roughly a sixth of the size of the PLY the editor uses, so it is usable over mobile data. (An address that pins a particular `.ply` downloads that file, as asked.) The page shows how far through it is. The editor keeps the full file, so exported images never come from the compressed one. The copy is made with `splat-transform`, which arrives with the frontend's dependencies; if it cannot be run the phone is given the full file instead and the job log says why.
 
-**This has to be HTTPS.** Browsers only give a page the camera on a secure origin, and a plain `http://` address on a local network is not one. (`localhost` counts as secure, but on the phone that means the phone itself, not the machine running the server.) Two ways to get it, and the script prints the exact address to open either way:
+**This has to be HTTPS.** Browsers only give a page the camera on a secure origin, and a plain `http://` address on a local network is not one. (`localhost` counts as secure, but on the phone that means the phone itself, not the machine running the server.) Three ways to get it, and the script prints the exact address to open whichever you use.
+
+If `tailscale serve` already proxies port 5173 on this machine, use no option at all:
+
+    scripts/dev.sh
+
+Tailscale terminates TLS on 443 with its own genuine certificate, so the phone opens `https://<this machine>.ts.net/viewer.html` -- no port number, no warning, mobile data included. The script detects the mapping and prints that address first. Do not add `--https` or `--tailscale` here: they make the dev server speak HTTPS while `serve` still forwards plain HTTP to it, and the mismatch answers 502. The script says so when it sees it, and names the two ways out.
 
     scripts/dev.sh --https
 
@@ -87,7 +93,7 @@ issues a self-signed certificate naming every address this machine answers to, i
 
 asks `tailscale cert` for a genuine certificate for this machine's tailnet name. No warning on the phone, and it works from anywhere signed into your tailnet, mobile data included, without opening a port on your router.
 
-The cost of the second one is worth stating plainly: certificates issued by a public authority are written into Certificate Transparency logs, which are public and permanent. What gets published is the name — `my-laptop.tail1234.ts.net` — and nothing else: not the machine's addresses, not what it serves, not that any of this exists. If you would rather publish nothing at all, use `--https` and accept one warning on the phone.
+The cost of `--tailscale` is worth stating plainly: certificates issued by a public authority are written into Certificate Transparency logs, which are public and permanent. What gets published is the name — `my-laptop.tail1234.ts.net` — and nothing else: not the machine's addresses, not what it serves, not that any of this exists. If you would rather publish nothing at all, use `--https` and accept one warning on the phone. The `tailscale serve` route above uses the same kind of certificate and carries the same cost, but it was already paid when `serve` was set up rather than by this script.
 
 ### Using it
 
@@ -268,7 +274,13 @@ StereoSplatViewer は、外部の `ml-sharp` を使って単一の写真から 3
 
 シーンを自動で見つけさせた場合、スマホがダウンロードするのは圧縮版で、エディタが使う PLY のおよそ6分の1です。モバイル回線でも実用になります。（アドレスで `.ply` を名指しした場合は、指定どおりそのファイルを落とします。）進捗はページに出ます。エディタ側は元のファイルを使い続けるので、**書き出した画像が圧縮版を経由することはありません**。圧縮には `splat-transform` を使います。フロントエンドの依存関係に含まれているので追加インストールは不要ですが、実行できない場合はスマホにも元のファイルが渡り、理由がジョブのログに残ります。
 
-**HTTPS が必須です。** ブラウザはセキュアオリジンでしかカメラを許可せず、LAN の素の `http://` はこれに当たりません（`localhost` は例外ですが、スマートフォンで開いた `localhost` はそのスマートフォン自身です）。方法は2つあり、どちらも開くべきアドレスがそのまま表示されます。
+**HTTPS が必須です。** ブラウザはセキュアオリジンでしかカメラを許可せず、LAN の素の `http://` はこれに当たりません（`localhost` は例外ですが、スマートフォンで開いた `localhost` はそのスマートフォン自身です）。方法は3つあり、どれも開くべきアドレスがそのまま表示されます。
+
+このマシンで既に `tailscale serve` がポート 5173 を張っている場合は、オプション無しが最良です。
+
+    scripts/dev.sh
+
+TLS は Tailscale が 443 で正規の証明書のまま終端するので、スマートフォンでは `https://<このマシン>.ts.net/viewer.html` を開くだけです。ポート番号も警告も不要で、モバイル回線からも届きます。スクリプトはこのマッピングを検出し、そのアドレスを最初に表示します。ここで `--https` や `--tailscale` を付けてはいけません。dev サーバが HTTPS を喋り始める一方 `serve` は素の HTTP を転送し続けるため、食い違って 502 になります。スクリプトはそれを検出したら警告し、2つの直し方を示します。
 
     scripts/dev.sh --https
 
@@ -278,7 +290,7 @@ StereoSplatViewer は、外部の `ml-sharp` を使って単一の写真から 3
 
 `tailscale cert` で、このマシンの tailnet 名に対する正規の証明書を取得します。警告は出ず、tailnet にサインインしていればモバイル回線からでも開けます。ルーターのポートを開ける必要もありません。
 
-後者の代償は明記しておきます。公的な認証局が発行した証明書は Certificate Transparency ログに記録され、これは公開かつ恒久です。公開されるのは `my-laptop.tail1234.ts.net` という**名前だけ**で、それ以外は何も出ません（アドレスも、何を配信しているかも、そもそもこれが存在することも）。何一つ公開したくない場合は `--https` を使い、警告を1度受け入れてください。
+`--tailscale` の代償は明記しておきます。公的な認証局が発行した証明書は Certificate Transparency ログに記録され、これは公開かつ恒久です。公開されるのは `my-laptop.tail1234.ts.net` という**名前だけ**で、それ以外は何も出ません（アドレスも、何を配信しているかも、そもそもこれが存在することも）。何一つ公開したくない場合は `--https` を使い、警告を1度受け入れてください。なお上の `tailscale serve` 経路も同じ種類の証明書を使うので代償は同じですが、それはこのスクリプトではなく `serve` を設定した時点で既に払われています。
 
 ### 使い方
 

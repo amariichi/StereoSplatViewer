@@ -39,6 +39,13 @@ export const DEFAULT_HEADING_DEADBAND_RAD = (0.2 * Math.PI) / 180;
 export const DEFAULT_TILT_GAIN = 0.5;
 export const MAX_TILT_CORRECTION_RAD = (18 * Math.PI) / 180;
 
+// A screen orientation change is reported when the layout crosses the
+// boundary, which is before the hand has finished turning the phone. Adopting
+// the very first sample after that would make a mid-turn attitude the new
+// definition of level, or drive the correction straight to its cap. Discarding
+// a fifth of a second of samples costs nothing a hand can notice.
+export const DEFAULT_ORIENTATION_SETTLE_MS = 250;
+
 const MIN_GRAVITY_MAGNITUDE = 2;
 
 // The offset introduced by the device being held in a different orientation is
@@ -247,8 +254,38 @@ export function createTiltTracker({
   let lastEmittedDirection = null;
   let lastEmittedScreenAngle = null;
   let lastEmittedHeading = null;
+  let settleUntil = null;
+
+  // Every value above describes one screen coordinate frame, so all of them go
+  // out of date together. Clearing them is what start and stop already did by
+  // hand; recenter needs the same clearance without the subscriptions and
+  // permissions those two rebuild.
+  function resetSamples() {
+    filter.reset();
+    gravityFilter.reset();
+    headingFilter.reset();
+    lastRawRoll = null;
+    lastRawHeading = null;
+    lastReading = null;
+    lastSmoothedReading = null;
+    lastEmittedDirection = null;
+    lastEmittedScreenAngle = null;
+    lastEmittedHeading = null;
+    settleUntil = null;
+  }
+
+  // Samples arriving inside the settling window belong to the turn itself, not
+  // to either posture. The deadline is a moment rather than a countdown, so a
+  // sample exactly at it is already the first of the new frame.
+  function settling() {
+    if (settleUntil === null) return false;
+    if (now() < settleUntil) return true;
+    settleUntil = null;
+    return false;
+  }
 
   function handleMotion(event) {
+    if (settling()) return;
     const gravity = event?.accelerationIncludingGravity;
     const screenAngle = screen?.orientation?.angle ?? 0;
     const roll = computeScreenRoll(gravity);
@@ -282,6 +319,7 @@ export function createTiltTracker({
   }
 
   function handleOrientation(event) {
+    if (settling()) return;
     const heading = computeScreenHeading(event);
     if (heading === null) return;
     lastRawHeading = heading;
@@ -317,14 +355,7 @@ export function createTiltTracker({
         orientationPermission,
       ]);
       if (permission !== 'granted') return permission;
-      filter.reset();
-      gravityFilter.reset();
-      headingFilter.reset();
-      lastSmoothedReading = null;
-      lastEmittedDirection = null;
-      lastEmittedScreenAngle = null;
-      lastRawHeading = null;
-      lastEmittedHeading = null;
+      resetSamples();
       target.addEventListener('devicemotion', handleMotion);
       if (headingPermission === 'granted') {
         target.addEventListener('deviceorientation', handleOrientation);
@@ -333,21 +364,22 @@ export function createTiltTracker({
       running = true;
       return 'granted';
     },
+    // Turning Hold level off and on repaired a portrait/landscape change
+    // because it threw the whole tracker away. Only the samples were ever
+    // wrong: the granted permissions and the live listeners describe no frame
+    // at all, and asking iOS for them again needs a user gesture nobody made.
+    recenter({ settleMs = 0 } = {}) {
+      resetSamples();
+      const delay = Number.isFinite(settleMs) && settleMs > 0 ? settleMs : 0;
+      settleUntil = delay > 0 ? now() + delay : null;
+    },
     stop() {
       if (!running) return;
       target.removeEventListener('devicemotion', handleMotion);
       if (orientationListening) target.removeEventListener('deviceorientation', handleOrientation);
       running = false;
       orientationListening = false;
-      filter.reset();
-      gravityFilter.reset();
-      headingFilter.reset();
-      lastRawRoll = null;
-      lastRawHeading = null;
-      lastSmoothedReading = null;
-      lastEmittedDirection = null;
-      lastEmittedScreenAngle = null;
-      lastEmittedHeading = null;
+      resetSamples();
     },
   };
 }

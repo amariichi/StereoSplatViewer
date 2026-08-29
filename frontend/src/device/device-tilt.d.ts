@@ -7,6 +7,7 @@ export const DEFAULT_HEADING_TIME_CONSTANT_MS: number;
 export const DEFAULT_HEADING_DEADBAND_RAD: number;
 export const DEFAULT_TILT_GAIN: number;
 export const MAX_TILT_CORRECTION_RAD: number;
+export const DEFAULT_ORIENTATION_SETTLE_MS: number;
 export const QUARTER_TURN: number;
 
 export function removeOrientationOffset(roll: number): number;
@@ -64,5 +65,6 @@ export function createTiltTracker(options?: {
   getRawHeading(): number | null;
   getHeading(): number | null;
   start(): Promise<string>;
+  recenter(options?: { settleMs?: number }): void;
   stop(): void;
 };
