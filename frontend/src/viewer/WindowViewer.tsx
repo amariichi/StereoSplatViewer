@@ -292,6 +292,9 @@ export function WindowViewer() {
   // published, never an absolute compass bearing.
   const headingReferenceRef = useRef<number | null>(null);
   const deviceYawRef = useRef(0);
+  // Read inside the sensor callback, which is created once and outlives any
+  // number of presses of the button.
+  const levelledRef = useRef(false);
   const eyeRef = useRef({ x: 0, y: 0, z: geometry.viewing.baselineEyeZ });
   const zoomRef = useRef(1);
   const panRef = useRef({ x: 0, y: 0 });
@@ -547,7 +550,19 @@ export function WindowViewer() {
   startTrackingRef.current = startTracking;
 
 
-  const startLevelling = useCallback(async () => {
+  /**
+   * Start the device sensors, which run for as long as the camera does.
+   *
+   * Which way the glass is turned is not a stabiliser: it is what makes the
+   * window a window. Without it a face tracker reads a turned phone as a moved
+   * head, and the scene swings the wrong way across its whole depth -- the
+   * disease `levelling.ts` was written to cure, and the reason turning Hold
+   * level off used to show the far edge of the splat instead of the near one.
+   * So yaw is measured whenever tracking runs, and the button below decides
+   * only whether the capped roll/tip levelling is applied on top of it.
+   */
+  const startSensors = useCallback(async () => {
+    if (tiltRef.current) return;
     setError(null);
     headingReferenceRef.current = null;
     deviceYawRef.current = 0;
@@ -558,6 +573,17 @@ export function WindowViewer() {
         // here bypassed it and fed raw accelerometer tremor into both axes.
         const reading = smoothedReading ?? tiltRef.current?.getSmoothedReading();
         if (!reading) return;
+        // Levelling off leaves the reference uncaptured, so switching it on
+        // adopts the posture the phone is in at that moment rather than one
+        // from whenever the sensors happened to start.
+        if (!levelledRef.current) {
+          if (levellingRef.current || levelReferenceRef.current) {
+            levellingRef.current = null;
+            levelReferenceRef.current = null;
+            publishPose();
+          }
+          return;
+        }
         if (!levelReferenceRef.current) {
           levelReferenceRef.current = upInDeviceFrame(reading);
         }
@@ -585,22 +611,31 @@ export function WindowViewer() {
     const outcome = await tilt.start();
     if (outcome === 'granted') {
       tiltRef.current = tilt;
-      setLevelled(true);
     } else {
-      setError('Motion access was refused. The view still works; it will not damp the tilt when the device is turned.');
+      setError('Motion access was refused. The view still works, but turning the device will be read as moving your head.');
     }
   }, [publishPose]);
 
-  startLevellingRef.current = startLevelling;
+  /** Hold the horizon level, from whatever posture the phone is in now. */
+  const enableLevelling = useCallback(async () => {
+    await startSensors();
+    if (!tiltRef.current) return;
+    levelReferenceRef.current = null;
+    levelledRef.current = true;
+    setLevelled(true);
+  }, [startSensors]);
 
-  /** Stop holding the scene level, and put it back square to the screen. */
-  const stopLevelling = useCallback(() => {
-    tiltRef.current?.stop();
-    tiltRef.current = null;
+  startLevellingRef.current = enableLevelling;
+
+  /**
+   * Stop holding the horizon level, and put the model back square to the
+   * screen. The sensors stay on: the phone's yaw still turns the window, so
+   * the scene behind the glass stays where it is in the room.
+   */
+  const disableLevelling = useCallback(() => {
     levellingRef.current = null;
     levelReferenceRef.current = null;
-    headingReferenceRef.current = null;
-    deviceYawRef.current = 0;
+    levelledRef.current = false;
     setLevelled(false);
     publishPose();
   }, [publishPose]);
@@ -610,6 +645,7 @@ export function WindowViewer() {
     trackerRef.current = null;
     tiltRef.current?.stop();
     tiltRef.current = null;
+    levelledRef.current = false;
     levellingRef.current = null;
     levelReferenceRef.current = null;
     headingReferenceRef.current = null;
@@ -1062,8 +1098,8 @@ export function WindowViewer() {
           </>
         )}
         <button type="button" className={levelled ? 'on' : ''}
-          title="Filter sensor jitter and hold the model in the room. True Window uses pitch/roll and relative phone yaw; Recenter captures a fresh reference."
-          onClick={levelled ? stopLevelling : startLevelling}>
+          title="Hold the model's horizon level against the phone's pitch and roll, up to 18 degrees. Turning the phone is corrected either way; Recenter captures a fresh reference."
+          onClick={levelled ? disableLevelling : enableLevelling}>
           Hold level {levelled ? 'on' : 'off'}
         </button>
         <button type="button" className={mirrorX ? 'on' : ''} onClick={toggleMirror}
