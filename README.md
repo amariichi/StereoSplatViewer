@@ -127,7 +127,7 @@ The lens cannot be judged before the scene exists, so the field stays afterwards
 
 ### Prerequisites
 - Python 3.10+
-- Node.js 20.19+ (22 or 24 recommended; 18 and 20.x before 20.19 have reached end of life). CI runs on 24.
+- Node.js 22.23.5+, 24.22.3+, or 26.13.1+ within those release lines (24 recommended). These minimums include the November 2026 security fixes; CI runs on 24.22.3.
 - Git
 - A working `ml-sharp` installation (separate repo; see below)
 
@@ -326,7 +326,7 @@ TLS は Tailscale が 443 で正規の証明書のまま終端するので、ス
 
 ### 前提
 - Python 3.10+
-- Node.js 20.19 以上（22 か 24 を推奨。18 と 20.19 未満は既にサポート終了）。CI は 24 で動かしています。
+- Node.js 22.23.5 以上／24.22.3 以上／26.13.1 以上（各系列内。24系推奨）。2026年11月のセキュリティ修正を含む最低版です。CI は 24.22.3 で動かしています。
 - Git
 - 動作する `ml-sharp` のインストール（別リポジトリ。下記参照）
 
